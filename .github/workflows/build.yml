@@ -75,8 +75,12 @@ jobs:
             0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838 .tools/sing-box
           get "https://github.com/Leadaxe/sing-box-lx/releases/download/v$SING_BOX_LX_VERSION/sing-box-$SING_BOX_LX_VERSION-darwin-arm64.tar.gz" \
             c4f4eddab7513e970f614766ea03c028de88ef5477f8dea629c9e63c2fb7c2b5 .tools/sing-box-lx
-          echo "SING_BOX=$PWD/.tools/sing-box/sing-box-$SING_BOX_VERSION-darwin-arm64/sing-box" >> "$GITHUB_ENV"
-          echo "SING_BOX_LX=$PWD/.tools/sing-box-lx/sing-box-$SING_BOX_LX_VERSION-darwin-arm64/sing-box" >> "$GITHUB_ENV"
+          # the folder inside each archive differs; find the binary itself
+          bin() { f=$(find "$PWD/$1" -type f -name sing-box | head -n 1); test -n "$f" && chmod +x "$f" && echo "$f"; }
+          sb=$(bin .tools/sing-box)
+          lx=$(bin .tools/sing-box-lx)
+          echo "SING_BOX=$sb" >> "$GITHUB_ENV"
+          echo "SING_BOX_LX=$lx" >> "$GITHUB_ENV"
 
       - name: Tests
         env:

@@ -88,7 +88,8 @@ fn selective_mode_and_rules() {
     // rule sets point to local files
     let rs = c["route"]["rule_set"].as_array().unwrap();
     assert_eq!(rs.len(), 2);
-    assert_eq!(rs[0]["path"], "C:\\rs\\geosite-discord.srs");
+    // joined with this system's separator
+    assert_eq!(rs[0]["path"], opts().ruleset_dir.join("geosite-discord.srs").to_string_lossy().into_owned());
     assert_eq!(b.rule_sets.len(), 2);
 }
 
