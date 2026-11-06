@@ -51,7 +51,12 @@ fn selective_mode_and_rules() {
     let mut yt = rule("YouTube", Route::Proxy);
     yt.rule_sets = vec!["geosite-youtube".into()];
     let mut discord = rule("Discord", Route::Profile { id: "p2".into() });
-    discord.apps = vec!["Discord.exe".into(), "C:\\Games\\".into()];
+    // a program and a folder, written the way this system writes them
+    let (apps, want) = match Os::CURRENT {
+        Os::Windows => (["Discord.exe", "C:\\Games\\"], json!(["(?i)\\\\Discord\\.exe$", "(?i)^C:\\\\Games\\\\"])),
+        Os::MacOs => (["Discord.app", "/Applications/Games/"], json!(["(?i)/Discord(?:\\.app/|$)", "(?i)^/Applications/Games/"])),
+    };
+    discord.apps = apps.map(String::from).to_vec();
     discord.rule_sets = vec!["geosite-discord".into()];
     let mut ads = rule("Реклама", Route::Block);
     ads.domains = vec!["ads.example.com".into(), "keyword:tracker".into()];
@@ -67,7 +72,7 @@ fn selective_mode_and_rules() {
     assert_eq!(rules[3], json!({"rule_set": ["geosite-youtube"], "action": "route", "outbound": "Нидерланды"}));
     assert_eq!(rules[4]["type"], "logical");
     assert_eq!(rules[4]["mode"], "or");
-    assert_eq!(rules[4]["rules"][0]["process_path_regex"], json!(["(?i)\\\\Discord\\.exe$", "(?i)^C:\\\\Games\\\\"]));
+    assert_eq!(rules[4]["rules"][0]["process_path_regex"], want);
     assert_eq!(rules[4]["rules"][1]["rule_set"], json!(["geosite-discord"]));
     assert_eq!(rules[4]["outbound"], "Финляндия");
     assert_eq!(rules[5], json!({"domain_keyword": ["tracker"], "domain_suffix": ["ads.example.com"], "action": "reject"}));
@@ -99,10 +104,14 @@ fn match_all_makes_one_rule_and_no_dns_rule() {
     d.rules = vec![r];
     d.settings.final_route = Route::Direct;
     let c = build(&d, &opts()).unwrap().config;
+    let chrome = match Os::CURRENT {
+        Os::Windows => "(?i)\\\\chrome\\.exe$",
+        Os::MacOs => "(?i)/chrome(?:\\.app/|$)",
+    };
     assert_eq!(
         c["route"]["rules"][3],
         json!({
-            "process_path_regex": ["(?i)\\\\chrome\\.exe$"],
+            "process_path_regex": [chrome],
             "rule_set": ["geosite-youtube"],
             "port": [443],
             "port_range": ["8000:9000"],
