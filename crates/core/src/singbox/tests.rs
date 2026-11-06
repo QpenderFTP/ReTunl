@@ -232,7 +232,11 @@ fn matchers() {
     assert_eq!(domain_matcher("*.example.com").unwrap(), ("domain_suffix", "example.com".into()));
     assert_eq!(domain_matcher("full:a.example.com").unwrap(), ("domain", "a.example.com".into()));
     assert_eq!(domain_matcher("10.0.0.0/8").unwrap(), ("ip_cidr", "10.0.0.0/8".into()));
-    assert_eq!(domain_matcher("пример.рф").unwrap().0, "domain_suffix");
+    // Cyrillic names become punycode, the form sing-box sees in traffic
+    assert_eq!(domain_matcher("рф").unwrap(), ("domain_suffix", "xn--p1ai".into()));
+    assert_eq!(domain_matcher("*.РФ").unwrap(), ("domain_suffix", "xn--p1ai".into()));
+    assert_eq!(domain_matcher("https://Президент.рф/news").unwrap(), ("domain_suffix", "xn--d1abbgf6aiiy.xn--p1ai".into()));
+    assert_eq!(domain_matcher("full:президент.рф").unwrap(), ("domain", "xn--d1abbgf6aiiy.xn--p1ai".into()));
     assert!(domain_matcher("not a domain").is_err());
     assert_eq!(cidr("1.2.3.4").unwrap(), "1.2.3.4/32");
     assert_eq!(cidr("2001:db8::/32").unwrap(), "2001:db8::/32");

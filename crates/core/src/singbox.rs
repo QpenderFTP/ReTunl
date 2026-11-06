@@ -296,7 +296,13 @@ pub fn domain_matcher(entry: &str) -> Result<(&'static str, String), String> {
     if is_ip(&host) || host.contains('/') && host.split('/').next().is_some_and(is_ip) {
         return Ok(("ip_cidr", cidr(&host)?));
     }
-    if !host.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.' || c == '_') {
+    // сайт.рф travels as punycode (xn--80aswg.xn--p1ai): sing-box compares that form
+    let host = if host.is_ascii() {
+        host
+    } else {
+        idna::domain_to_ascii(&host).map_err(|_| format!("«{entry}» не похоже на домен"))?
+    };
+    if !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_') {
         return Err(format!("«{entry}» не похоже на домен"));
     }
     Ok((field, host))
