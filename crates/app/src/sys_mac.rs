@@ -64,6 +64,9 @@ pub struct Stop {
 }
 
 /// sing-box as started for a connection.
+/// The running core, as the engine holds it.
+pub type Proc = std::process::Child;
+
 pub struct Launch {
     pub child: Child,
     /// sing-box writes its log here instead of the pipes

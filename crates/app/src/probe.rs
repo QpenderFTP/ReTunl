@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use retunl_core::awg::{pick_core, CoreKind, CoreNeed, CorePref};
@@ -29,7 +28,7 @@ const PARALLEL: usize = 8;
 
 /// A sing-box started for a test; it is stopped when this is dropped.
 pub struct ProbeCore {
-    child: Child,
+    child: sys::Proc,
     pub clash: Clash,
 }
 
@@ -63,6 +62,28 @@ pub fn unsupported(paths: &Paths, kind: CoreKind, p: &Profile) -> Option<&'stati
     Some(if paths.find_lx_core().is_some() { "Включите ядро sing-box-lx в настройках" } else { "Нужно ядро sing-box-lx" })
 }
 
+#[cfg(not(target_os = "android"))]
+fn spawn(paths: &Paths, core: &Path, file: &Path) -> Result<sys::Proc, String> {
+    use std::process::Stdio;
+    sys::quiet(core)
+        .args(["run", "--disable-color", "-c"])
+        .arg(file)
+        .arg("-D")
+        .arg(paths.run_dir())
+        .current_dir(paths.run_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Не удалось запустить sing-box: {e}"))
+}
+
+/// The test runs inside the app, next to the VPN, without a tunnel of its own.
+#[cfg(target_os = "android")]
+fn spawn(_paths: &Paths, _core: &Path, file: &Path) -> Result<sys::Proc, String> {
+    sys::start_test(file).map_err(|e| format!("Проверка не запустилась: {}", crate::engine::humanize(&e)))
+}
+
 /// A free port on 127.0.0.1.
 pub fn free_port() -> Result<u16, String> {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -84,29 +105,25 @@ pub async fn launch(
 ) -> Result<ProbeCore, String> {
     let file = paths.run_dir().join(file_name);
     std::fs::write(&file, serde_json::to_vec_pretty(cfg).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let child = sys::quiet(core)
-        .args(["run", "--disable-color", "-c"])
-        .arg(&file)
-        .arg("-D")
-        .arg(paths.run_dir())
-        .current_dir(paths.run_dir())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Не удалось запустить sing-box: {e}"))?;
+    let child = spawn(paths, core, &file)?;
     if let Some(job) = job {
         job.assign(&child);
     }
     let mut probe = ProbeCore { child, clash: Clash::new(port, secret) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(Some(_)) = probe.child.try_wait() {
-            let mut err = String::new();
-            if let Some(mut e) = probe.child.stderr.take() {
-                use std::io::Read;
-                let _ = e.read_to_string(&mut err);
-            }
+        if let Ok(Some(_exit)) = probe.child.try_wait() {
+            #[cfg(target_os = "android")]
+            let err = _exit.error.unwrap_or_default();
+            #[cfg(not(target_os = "android"))]
+            let err = {
+                let mut err = String::new();
+                if let Some(mut e) = probe.child.stderr.take() {
+                    use std::io::Read;
+                    let _ = e.read_to_string(&mut err);
+                }
+                err
+            };
             let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("неизвестная ошибка");
             return Err(format!("Проверка не запустилась: {}", crate::engine::humanize(line)));
         }

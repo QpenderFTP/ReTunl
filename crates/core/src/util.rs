@@ -9,10 +9,18 @@ use percent_encoding::percent_decode_str;
 pub enum Os {
     Windows,
     MacOs,
+    /// Programs are app packages (`org.telegram.messenger`); only the VPN mode exists.
+    Android,
 }
 
 impl Os {
-    pub const CURRENT: Os = if cfg!(target_os = "macos") { Os::MacOs } else { Os::Windows };
+    pub const CURRENT: Os = if cfg!(target_os = "android") {
+        Os::Android
+    } else if cfg!(target_os = "macos") {
+        Os::MacOs
+    } else {
+        Os::Windows
+    };
 }
 
 /// `s` without `suffix`, ignoring ASCII case.

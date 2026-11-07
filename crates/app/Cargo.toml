@@ -5,25 +5,29 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The app is a library: the desktop binary (main.rs) and Android load it.
+[lib]
+name = "retunl_lib"
+crate-type = ["cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 retunl-core = { path = "../core" }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-dialog = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-clipboard-manager = "2"
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 base64.workspace = true
 percent-encoding.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 dirs = "6"
-arboard = { version = "3", default-features = false }
 png = "0.17"
 # managing your own servers over SSH
 russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
@@ -31,6 +35,18 @@ curve25519-dalek = "5"
 rand_core = { version = "0.6", features = ["getrandom"] }
 qrcode = { version = "0.14", default-features = false }
 flate2 = "1"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+# Android: sing-box runs in the app (crates/vpn-android); files come as content:// links
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-retunl-vpn = { path = "../vpn-android" }
+tauri-plugin-fs = "2"
+tauri-plugin-barcode-scanner = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

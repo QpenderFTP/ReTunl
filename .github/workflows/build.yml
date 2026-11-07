@@ -1,6 +1,11 @@
-# Installers for Windows (NSIS .exe) and macOS (.dmg, Apple Silicon + Intel).
+# Installers for Windows (NSIS .exe) and macOS (.dmg, Apple Silicon + Intel),
+# APKs for Android (arm64 and armv7 phones).
 # Run it by hand (Actions → Build → Run workflow) or push a tag like v0.1.0:
-# a tag also publishes a release with both installers attached.
+# a tag also publishes a release with all of them attached.
+#
+# The APKs are signed with the release key from the repository secrets
+# ANDROID_KEYSTORE_B64 (the .jks file in base64), ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD.
 
 name: Build
 
@@ -98,9 +103,91 @@ jobs:
           path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
+  android:
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 29.0.14206865
+      ANDROID_PLATFORM: android-37.0
+    steps:
+      - uses: actions/checkout@v4
+
+      # the NDK, Rust for two phone architectures and the Go build of the core need room
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/node_modules/@angular /opt/ghc /usr/local/.ghcup /usr/local/share/boost
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Android NDK and platform
+        run: |
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdk" --licenses > /dev/null || true
+          "$sdk" --install "ndk;$NDK_VERSION" "platforms;$ANDROID_PLATFORM" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      # libbox (sing-box-lx with the Clash API) takes long to build: it is kept
+      # between runs and built again only when tools/build-libbox.sh changes
+      - uses: actions/cache@v4
+        id: libbox
+        with:
+          path: .tools/libbox-*-retunl.aar
+          key: libbox-arm-${{ hashFiles('tools/build-libbox.sh') }}
+      - uses: actions/setup-go@v5
+        if: steps.libbox.outputs.cache-hit != 'true'
+        with:
+          go-version: "1.26.10"
+          cache: false
+      - name: libbox
+        env:
+          LIBBOX_TARGETS: android/arm64,android/arm
+          LIBBOX_ABIS: arm64-v8a armeabi-v7a
+        run: bash tools/prepare-libbox.sh
+
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::The ANDROID_KEYSTORE_B64 secret is missing: without the key the APK cannot be installed (README, «Сборка» → «Android»)."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/retunl.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/retunl.jks" >> "$GITHUB_ENV"
+
+      - name: APK
+        working-directory: crates/app
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: npx --yes @tauri-apps/cli@2 android build --apk --split-per-abi --target aarch64 --target armv7
+
+      - name: Name the APKs
+        run: |
+          v=$(grep -m1 '"version"' crates/app/tauri.conf.json | cut -d'"' -f4)
+          out=crates/app/gen/android/app/build/outputs/apk
+          ls -R "$out"
+          mkdir -p dist
+          # a name ending in -unsigned.apk means the key did not apply: then this fails
+          cp "$out/arm64/release/app-arm64-release.apk" "dist/ReTunl_${v}_arm64.apk"
+          cp "$out/arm/release/app-arm-release.apk" "dist/ReTunl_${v}_armv7.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReTunl-android
+          path: dist/*.apk
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos]
+    needs: [windows, macos, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

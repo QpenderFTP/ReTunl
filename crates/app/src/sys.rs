@@ -37,6 +37,9 @@ pub const STOP_GRACE_MS: u64 = 6000;
 pub struct Stop;
 
 /// sing-box as started for a connection.
+/// The running core, as the engine holds it.
+pub type Proc = std::process::Child;
+
 pub struct Launch {
     pub child: std::process::Child,
     /// sing-box writes its log here instead of the pipes (macOS only)

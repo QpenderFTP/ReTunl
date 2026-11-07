@@ -6,7 +6,7 @@ import {
   h, s, icon, invoke, listen, busy, toast, errorToast, errText, dialog, confirmDialog, promptDialog, popMenu,
   pageHead, fmtAgo, fmtBytes, plural, banner, seg, now,
 } from './lib.js';
-import { store, refresh, copyText, reportImport } from './store.js';
+import { store, refresh, copyText, reportImport, here } from './store.js';
 
 let list = null; // ServerView[] once loaded
 let autoScanned = false;
@@ -464,7 +464,7 @@ function keyDialog(key, sv) {
         errorToast(e);
       }
     }),
-  }, icon('plug'), 'Подключить этот компьютер');
+  }, icon('plug'), `Подключить ${here().this}`);
   const dl = dialog({
     title: `Клиент «${key.name}»`,
     lead: `Настройки для подключения к «${sv.name}».`,
@@ -605,7 +605,7 @@ export function addDialog(mode = 'password') {
   f.link.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.ctrlKey) go(); });
   const dl = dialog({
     title: 'Добавить сервер',
-    lead: 'Пароль и ключ хранятся только на этом компьютере в зашифрованном виде и уходят только на сам сервер.',
+    lead: `Пароль и ключ хранятся только ${here().onThis} в зашифрованном виде и уходят только на сам сервер.`,
     body: [
       seg([
         { value: 'password', label: 'Пароль' },
@@ -633,7 +633,7 @@ function installDialog(sv, prev) {
   const port = h('input.input.num-input#inst-port', { type: 'number', min: 1, max: 65535 });
   const site = h('input.input.wide#inst-site', { value: (prev && prev.site) || 'www.googletagmanager.com', spellcheck: false });
   const withClient = h('input', { type: 'checkbox', checked: prev ? !!prev.client : true });
-  const clientName = h('input.input#inst-client', { value: (prev && prev.client) || 'Этот компьютер', maxLength: 64, 'aria-label': 'Имя первого клиента' });
+  const clientName = h('input.input#inst-client', { value: (prev && prev.client) || here().This, maxLength: 64, 'aria-label': 'Имя первого клиента' });
   const netNote = h('p.field-note');
   const siteBox = h('div.field.grow',
     h('label.field-label', { htmlFor: 'inst-site' }, 'Сайт для маскировки'),
@@ -666,7 +666,7 @@ function installDialog(sv, prev) {
         site.focus();
         return;
       }
-      const client = withClient.checked ? clientName.value.trim() || 'Этот компьютер' : null;
+      const client = withClient.checked ? clientName.value.trim() || here().This : null;
       dl.close();
       startInstall(sv, pick, { kind: pick.kind, port: p, site: site.value.trim(), client });
     },

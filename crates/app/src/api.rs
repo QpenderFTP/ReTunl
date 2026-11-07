@@ -15,6 +15,7 @@ use retunl_core::{dns, wgconf, AppData, CustomPreset, Profile, Route, Rule, Sett
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::blocks::BlockStats;
@@ -23,7 +24,7 @@ use crate::probe::{self, Latency};
 use crate::speed::{self, SpeedResult};
 use crate::state::{add_profiles, forget_profiles, merge_subscription, AppState};
 use crate::sys::{self, Adapter, Autostart, ProcInfo};
-use crate::{fetch, icons};
+use crate::{fetch, files, icons};
 
 type St<'a> = State<'a, Arc<AppState>>;
 type R<T> = Result<T, String>;
@@ -211,31 +212,31 @@ pub async fn import_text(st: St<'_>, text: String) -> R<ImportSummary> {
 }
 
 #[tauri::command]
-pub async fn import_clipboard(st: St<'_>) -> R<ImportSummary> {
-    let text = tokio::task::spawn_blocking(|| arboard::Clipboard::new().and_then(|mut c| c.get_text()))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|_| "В буфере обмена нет текста.".to_string())?;
+pub async fn import_clipboard(app: AppHandle, st: St<'_>) -> R<ImportSummary> {
+    let text = app.clipboard().read_text().ok().filter(|t| !t.trim().is_empty()).ok_or("В буфере обмена нет текста.")?;
     import_any(st.inner(), &text).await
 }
 
 #[tauri::command]
 pub async fn import_file(app: AppHandle, st: St<'_>) -> R<Option<ImportSummary>> {
+    let a = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .set_title("Файл конфигурации")
-            .add_filter("Конфигурации и экспорт ReTunl", &["conf", "txt", "json", bundle::EXTENSION])
-            .add_filter("Все файлы", &["*"])
-            .blocking_pick_file()
+        let d = a.dialog().file().set_title("Файл конфигурации");
+        // Android filters by file type, and .conf has none: show everything there
+        let d = if cfg!(target_os = "android") {
+            d
+        } else {
+            d.add_filter("Конфигурации и экспорт ReTunl", &["conf", "txt", "json", bundle::EXTENSION]).add_filter("Все файлы", &["*"])
+        };
+        d.blocking_pick_file()
     })
     .await
     .map_err(|e| e.to_string())?;
-    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
-    let bytes = std::fs::read(&path).map_err(|e| format!("Не удалось прочитать файл: {e}"))?;
+    let Some(picked) = picked else { return Ok(None) };
+    let bytes = files::read(&app, &picked)?;
     let text = String::from_utf8_lossy(&bytes).to_string();
     if wgconf::looks_like_wg_conf(&text) {
-        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = files::stem(&picked);
         return match wgconf::parse(&text, &stem) {
             Ok(w) => {
                 let res = ImportResult { profiles: vec![w.profile], links: vec![None], warnings: w.warnings, ..Default::default() };
@@ -703,8 +704,9 @@ pub async fn export_bundle(app: AppHandle, st: St<'_>, request: ExportRequest) -
         return Ok(Some(ExportResult { text: Some(text), path: None }));
     }
     let name = format!("ReTunl {}.{}", ymd(now_unix()), bundle::EXTENSION);
+    let a = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        app.dialog()
+        a.dialog()
             .file()
             .set_title("Сохранить экспорт ReTunl")
             .set_file_name(&name)
@@ -713,9 +715,9 @@ pub async fn export_bundle(app: AppHandle, st: St<'_>, request: ExportRequest) -
     })
     .await
     .map_err(|e| e.to_string())?;
-    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
-    std::fs::write(&path, text.as_bytes()).map_err(|e| format!("Не удалось сохранить файл: {e}"))?;
-    Ok(Some(ExportResult { text: None, path: Some(path.display().to_string()) }))
+    let Some(picked) = picked else { return Ok(None) };
+    files::write(&app, &picked, text.as_bytes())?;
+    Ok(Some(ExportResult { text: None, path: Some(files::shown(&picked)) }))
 }
 
 #[derive(Serialize)]
@@ -877,6 +879,9 @@ pub async fn get_icons(st: St<'_>, paths: Vec<String>) -> R<HashMap<String, Opti
     };
     if !todo.is_empty() {
         let found = tokio::task::spawn_blocking(move || {
+            #[cfg(target_os = "android")]
+            return icons::icons(&todo).into_iter().collect::<Vec<_>>();
+            #[cfg(not(target_os = "android"))]
             todo.into_iter().map(|p| {
                 let icon = icons::exe_icon_data_url(&p);
                 (p, icon)
@@ -895,6 +900,9 @@ pub async fn get_icons(st: St<'_>, paths: Vec<String>) -> R<HashMap<String, Opti
 
 #[tauri::command]
 pub async fn pick_exe(app: AppHandle) -> R<Option<String>> {
+    if cfg!(target_os = "android") {
+        return Err("На Android приложение выбирается из списка".into());
+    }
     let picked = tokio::task::spawn_blocking(move || {
         let ext: &[&str] = if cfg!(windows) { &["exe"] } else { &["app"] };
         app.dialog().file().set_title("Выберите программу").add_filter("Программы", ext).blocking_pick_file()
@@ -906,6 +914,13 @@ pub async fn pick_exe(app: AppHandle) -> R<Option<String>> {
 
 #[tauri::command]
 pub async fn pick_folder(app: AppHandle) -> R<Option<String>> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        Err("На Android папки программ не выбираются".into())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
     let picked = tokio::task::spawn_blocking(move || {
         app.dialog().file().set_title("Папка: все программы внутри неё").blocking_pick_folder()
     })
@@ -916,11 +931,12 @@ pub async fn pick_folder(app: AppHandle) -> R<Option<String>> {
         let sep = std::path::MAIN_SEPARATOR;
         if s.ends_with(sep) { s } else { format!("{s}{sep}") }
     }))
+    }
 }
 
 #[tauri::command]
-pub fn copy_text(text: String) -> R<()> {
-    arboard::Clipboard::new().and_then(|mut c| c.set_text(text)).map_err(|e| format!("Буфер обмена недоступен: {e}"))
+pub fn copy_text(app: AppHandle, text: String) -> R<()> {
+    app.clipboard().write_text(text).map_err(|e| format!("Буфер обмена недоступен: {e}"))
 }
 
 #[tauri::command]
@@ -939,6 +955,9 @@ pub fn set_autostart(enabled: bool) -> R<Autostart> {
 
 #[tauri::command]
 pub async fn download_core(app: AppHandle, st: St<'_>, kind: Option<CoreKind>) -> R<String> {
+    if cfg!(target_os = "android") {
+        return Err("На Android ядро встроено в приложение и обновляется вместе с ним.".into());
+    }
     let kind = kind.unwrap_or_default();
     let dir = match kind {
         CoreKind::Official => st.paths.core_dir(),
@@ -993,6 +1012,18 @@ pub fn open_url(url: String) -> R<()> {
     Ok(())
 }
 
+/// Android: status and navigation bar icons dark on a light theme, light on a dark one.
+#[tauri::command(async)]
+pub fn set_system_bars(dark: bool) -> R<()> {
+    #[cfg(target_os = "android")]
+    return tauri_plugin_retunl_vpn::system_bars(dark);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = dark;
+        Ok(())
+    }
+}
+
 /// The page has loaded: show the window unless we started hidden in the tray.
 #[tauri::command]
 pub fn app_ready(app: AppHandle, st: St<'_>) {
@@ -1011,6 +1042,7 @@ pub async fn quit_app(app: AppHandle, st: St<'_>) -> R<()> {
     Ok(())
 }
 
+#[cfg_attr(mobile, allow(dead_code))]
 pub fn is_need_admin(e: &str) -> bool {
     e == NEED_ADMIN
 }

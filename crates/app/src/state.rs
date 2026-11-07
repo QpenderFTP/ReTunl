@@ -12,6 +12,7 @@ use crate::engine::{Engine, StartRequest};
 use crate::paths::Paths;
 use crate::probe::Latency;
 use crate::speed::SpeedResult;
+#[cfg(desktop)]
 use crate::tray::Tray;
 use crate::{fetch, store};
 
@@ -25,6 +26,7 @@ pub struct AppState {
     pub icons: Mutex<HashMap<String, Option<String>>>,
     pub reload_gen: AtomicU64,
     pub handle: OnceLock<AppHandle>,
+    #[cfg(desktop)]
     pub tray: Mutex<Option<Tray>>,
     pub warning: Mutex<Option<String>>,
     /// Started by autostart / minimized: keep the window in the tray.
@@ -51,6 +53,7 @@ impl AppState {
             icons: Mutex::new(HashMap::new()),
             reload_gen: AtomicU64::new(0),
             handle: OnceLock::new(),
+            #[cfg(desktop)]
             tray: Mutex::new(None),
             warning: Mutex::new(warning),
             speed: Mutex::new(None),

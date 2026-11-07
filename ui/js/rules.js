@@ -4,7 +4,7 @@ import {
   h, s, icon, invoke, busy, toast, errorToast, errText, dialog, confirmDialog, popMenu, pageHead, seg, plural,
 } from './lib.js';
 import {
-  store, D, S, act, refresh, routeChip, routePicker, appIcon, appLabel, iconPath, loadIcons, ensureProcIndex, isMac,
+  store, D, S, act, refresh, routeChip, routePicker, appIcon, appLabel, iconPath, loadIcons, ensureProcIndex, isMac, isAndroid,
 } from './store.js';
 
 const PUNY = { 'xn--p1ai': 'рф', 'xn--d1acj3b': 'дети', 'xn--80asehdb': 'онлайн', 'xn--p1acf': 'рус' };
@@ -21,7 +21,7 @@ export const rules = {
     root.append(pageHead('Правила', [
       h('button.btn', { onclick: gallery }, icon('list'), 'Шаблоны'),
       h('button.btn.primary', { onclick: () => openRuleEditor() }, icon('plus'), 'Новое правило'),
-    ], 'Правила проверяются сверху вниз: соединение идёт по первому подходящему. Порядок меняется перетаскиванием за ручку слева.'));
+    ], 'Правила проверяются сверху вниз: соединение идёт по первому подходящему. ' + (isAndroid() ? 'Порядок меняется в меню правила: «Выше» и «Ниже».' : 'Порядок меняется перетаскиванием за ручку слева.')));
     if (!d.rules.length) root.append(quickStart());
     const list = h('ol.rule-list', { 'aria-label': 'Правила по порядку' }, d.rules.map(ruleRow));
     if (d.rules.length) {
@@ -317,6 +317,8 @@ function splitDest(text) {
 function normalizeApp(v) {
   let a = v.trim().replace(/^"|"$/g, '');
   if (!a) return '';
+  // Android: apps are package names, as they are
+  if (isAndroid()) return a;
   // a bare name: Windows needs the .exe, macOS matches the program or its .app
   if (!isMac() && !/[\\/]/.test(a) && !/\.[a-z0-9]{2,4}$/i.test(a)) a += '.exe';
   return a;
@@ -349,7 +351,9 @@ export function openRuleEditor(rule, { asPreset = false, onSaved } = {}) {
 
   // apps
   const appsBox = h('div.chips');
-  const appInput = h('input.input.app-input', { placeholder: isMac() ? 'Название.app или путь' : 'имя.exe или путь', 'aria-label': 'Имя программы или путь к ней' });
+  const appInput = isAndroid()
+    ? h('input.input.app-input', { placeholder: 'или пакет: org.example.app', 'aria-label': 'Имя пакета приложения', autocapitalize: 'off', spellcheck: false })
+    : h('input.input.app-input', { placeholder: isMac() ? 'Название.app или путь' : 'имя.exe или путь', 'aria-label': 'Имя программы или путь к ней' });
   const addApp = (v) => {
     const a = normalizeApp(v);
     if (!a || r.apps.some((x) => x.toLowerCase() === a.toLowerCase())) return;
@@ -372,7 +376,7 @@ export function openRuleEditor(rule, { asPreset = false, onSaved } = {}) {
         type: 'button', 'aria-label': 'Убрать ' + appLabel(a),
         onclick: () => { r.apps.splice(i, 1); renderApps(); renderMatch(); },
       }, icon('close')))));
-    if (!r.apps.length) appsBox.append(h('span.chips-empty', 'Любая программа'));
+    if (!r.apps.length) appsBox.append(h('span.chips-empty', isAndroid() ? 'Любое приложение' : 'Любая программа'));
   }
 
   // destinations
@@ -453,8 +457,9 @@ export function openRuleEditor(rule, { asPreset = false, onSaved } = {}) {
     h('span', h('span.match-title', title), h('span.match-text', text)));
   matchBox.append(
     h('div.field-label', 'Когда срабатывает'),
-    matchOpt(false, 'Программа или адрес', 'Ловит всё, что делают выбранные программы, и любые соединения с указанными адресами.'),
-    matchOpt(true, 'Программа и адрес вместе', 'Например, только YouTube в Chrome — остальные сайты Chrome пойдут по другим правилам.'));
+    matchOpt(false, isAndroid() ? 'Приложение или адрес' : 'Программа или адрес',
+      isAndroid() ? 'Ловит всё, что делают выбранные приложения, и любые соединения с указанными адресами.' : 'Ловит всё, что делают выбранные программы, и любые соединения с указанными адресами.'),
+    matchOpt(true, isAndroid() ? 'Приложение и адрес вместе' : 'Программа и адрес вместе', 'Например, только YouTube в Chrome — остальные сайты Chrome пойдут по другим правилам.'));
   function renderMatch() {
     const { domains, ips } = splitDest(dest.value);
     matchBox.hidden = !(r.apps.length && (domains.length || ips.length || r.rule_sets.length));
@@ -506,7 +511,14 @@ export function openRuleEditor(rule, { asPreset = false, onSaved } = {}) {
       h('div.field.grow', h('label.field-label', { htmlFor: 're-name' }, asPreset ? 'Название шаблона' : 'Название'), name),
       h('div.field', h('div.field-label', 'Куда направить'), routePicker(r.route, (v) => { r.route = v; }))),
     descr && h('div.field', h('label.field-label', { htmlFor: 're-descr' }, 'Описание'), descr),
-    h('section.editor-sec',
+    isAndroid() ? h('section.editor-sec',
+      h('h3.editor-h', 'Приложения'),
+      appsBox,
+      h('div.inline-actions',
+        h('button.btn.small', { type: 'button', onclick: () => processPicker((list) => list.forEach(addApp)) }, icon('plus'), 'Выбрать приложения…'),
+        appInput),
+      h('p.field-note', 'Работает на Android 10 и новее: старые версии не сообщают, какое приложение открыло соединение.'))
+    : h('section.editor-sec',
       h('h3.editor-h', 'Программы'),
       appsBox,
       h('div.inline-actions',
@@ -597,13 +609,14 @@ const SYSTEM = new Set(['svchost.exe', 'csrss.exe', 'smss.exe', 'wininit.exe', '
 const SYSTEM_DIR = /^\/(System|usr\/(libexec|sbin)|sbin|Library\/Apple)\//;
 
 async function processPicker(onPick) {
-  const search = h('input.input.wide', { type: 'search', placeholder: 'Найти программу', 'aria-label': 'Поиск программы' });
+  const phone = isAndroid();
+  const search = h('input.input.wide', { type: 'search', placeholder: phone ? 'Найти приложение' : 'Найти программу', 'aria-label': phone ? 'Поиск приложения' : 'Поиск программы' });
   const list = h('div.proc-list', h('p.muted', 'Загружаю список…'));
   const showSys = h('input', { type: 'checkbox' });
   const chosen = new Set();
   const add = h('button.btn.primary', { disabled: true, onclick: () => { onPick([...chosen]); dl.close(); } }, 'Добавить');
   const dl = dialog({
-    title: 'Запущенные программы',
+    title: phone ? 'Приложения' : 'Запущенные программы',
     body: [h('div.proc-tools', search, h('label.check', showSys, 'Показать системные')), list],
     actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), add],
   });
@@ -614,18 +627,22 @@ async function processPicker(onPick) {
     list.replaceChildren(h('p.form-error', errText(e)));
     return;
   }
+  // a rule names a program by its file name, an Android app by its package
+  const keyOf = (p) => (phone ? p.path : p.name);
   const seen = new Map();
-  for (const p of procs) if (!seen.has(p.name.toLowerCase())) seen.set(p.name.toLowerCase(), p);
+  for (const p of procs) if (!seen.has(keyOf(p).toLowerCase())) seen.set(keyOf(p).toLowerCase(), p);
   procs = [...seen.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }));
+  if (phone) for (const p of procs) store.appNames.set(p.path, p.name);
+  const hidden = (p) => (phone ? p.system : SYSTEM.has(p.name.toLowerCase()) || /\\windows\\system32\\/i.test(p.path) || SYSTEM_DIR.test(p.path));
   const render = () => {
     const q = search.value.trim().toLowerCase();
-    const items = procs.filter((p) => (showSys.checked || (!SYSTEM.has(p.name.toLowerCase()) && !/\\windows\\system32\\/i.test(p.path) && !SYSTEM_DIR.test(p.path)))
+    const items = procs.filter((p) => (showSys.checked || !hidden(p))
       && (!q || p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q)));
     list.replaceChildren(...items.map((p) => {
       const cb = h('input', {
-        type: 'checkbox', checked: chosen.has(p.name),
+        type: 'checkbox', checked: chosen.has(keyOf(p)),
         onchange: () => {
-          cb.checked ? chosen.add(p.name) : chosen.delete(p.name);
+          cb.checked ? chosen.add(keyOf(p)) : chosen.delete(keyOf(p));
           add.disabled = !chosen.size;
           add.textContent = chosen.size ? `Добавить (${chosen.size})` : 'Добавить';
         },

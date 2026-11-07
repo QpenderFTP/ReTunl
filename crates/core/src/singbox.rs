@@ -64,6 +64,7 @@ enum Target {
 
 struct Ctx<'a> {
     data: &'a AppData,
+    os: Os,
     /// profile id → tag
     tag_of: HashMap<String, String>,
     used_tags: HashSet<String>,
@@ -115,8 +116,9 @@ impl<'a> Ctx<'a> {
 /// Matcher fields of one user rule, split the way sing-box combines them.
 #[derive(Default)]
 struct Parts {
-    /// process_path_regex
+    /// process_path_regex, or package_name on Android ([`Parts::app_field`])
     apps: Vec<String>,
+    app_field: &'static str,
     /// field → values (domain, domain_suffix, domain_keyword, domain_regex, ip_cidr, rule_set)
     dest: BTreeMap<&'static str, Vec<String>>,
     /// Domain-type rule sets (usable in DNS rules).
@@ -152,7 +154,8 @@ impl Parts {
     }
     fn write_apps(&self, m: &mut Map<String, Value>) {
         if !self.apps.is_empty() {
-            m.insert("process_path_regex".into(), json!(self.apps));
+            let field = if self.app_field.is_empty() { "process_path_regex" } else { self.app_field };
+            m.insert(field.into(), json!(self.apps));
         }
     }
     fn write_dest(&self, m: &mut Map<String, Value>) {
@@ -170,6 +173,22 @@ enum AppMatch {
     Name(String),
     /// a whole regex: an exact path or a folder
     Regex(String),
+    /// an Android app package, matched exactly
+    Package(String),
+}
+
+/// `org.telegram.messenger`: what Android calls an app.
+pub fn is_package_name(s: &str) -> bool {
+    let mut parts = 0;
+    for part in s.split('.') {
+        let mut chars = part.chars();
+        let ok_first = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+        if !ok_first || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        parts += 1;
+    }
+    parts >= 2
 }
 
 fn has_app_suffix(s: &str) -> bool {
@@ -183,6 +202,9 @@ fn app_match(entry: &str, os: Os) -> Result<AppMatch, String> {
     }
     let not_app = || format!("«{entry}» — не похоже на программу");
     match os {
+        // A program from a rule made on a computer stays as it is: it matches
+        // no app here, so the rule does not suddenly catch everything.
+        Os::Android => Ok(AppMatch::Package(raw.to_string())),
         Os::Windows => {
             // a macOS path or bundle from a rule made on a Mac: keep the program name
             let unix = raw.trim_end_matches('/');
@@ -243,6 +265,7 @@ fn names_regex(names: &[String], os: Os) -> String {
     match os {
         Os::Windows => format!("(?i)\\\\{joined}$"),
         Os::MacOs => format!("(?i)/{joined}(?:\\.app/|$)"),
+        Os::Android => joined,
     }
 }
 
@@ -254,7 +277,7 @@ pub fn app_regex(entry: &str) -> Result<String, String> {
 pub fn app_regex_for(entry: &str, os: Os) -> Result<String, String> {
     Ok(match app_match(entry, os)? {
         AppMatch::Name(n) => names_regex(&[n], os),
-        AppMatch::Regex(r) => r,
+        AppMatch::Regex(r) | AppMatch::Package(r) => r,
     })
 }
 
@@ -357,17 +380,32 @@ fn rule_parts(ctx: &mut Ctx, rule: &Rule) -> Res<Parts> {
     let name = if rule.name.trim().is_empty() { "без названия" } else { rule.name.trim() };
     let bad = |e: String| BuildError(format!("Правило «{name}»: {e}"));
     let mut parts = Parts::default();
+    let os = ctx.os;
+    if os == Os::Android {
+        parts.app_field = "package_name";
+    }
 
     let mut names = Vec::new();
+    let mut foreign = false;
     for app in &rule.apps {
         // plain program names are merged into one expression
-        match app_match(app, Os::CURRENT).map_err(bad)? {
+        match app_match(app, os).map_err(bad)? {
             AppMatch::Name(n) => names.push(n),
             AppMatch::Regex(r) => parts.apps.push(r),
+            AppMatch::Package(p) => {
+                let lower = p.to_ascii_lowercase();
+                foreign |= !is_package_name(&p) || lower.ends_with(".exe") || lower.ends_with(".app");
+                if !parts.apps.contains(&p) {
+                    parts.apps.push(p);
+                }
+            }
         }
     }
     if !names.is_empty() {
-        parts.apps.insert(0, names_regex(&names, Os::CURRENT));
+        parts.apps.insert(0, names_regex(&names, os));
+    }
+    if foreign {
+        ctx.warnings.push(format!("Правило «{name}»: программы с компьютера на телефоне ни с чем не совпадут — выберите приложения заново."));
     }
     for d in &rule.domains {
         let (field, v) = domain_matcher(d).map_err(bad)?;
@@ -438,7 +476,7 @@ pub fn rule_signatures(rule: &Rule) -> Vec<String> {
     if let Some(a) = rule.apps.first() {
         // the escaped name or path appears inside the merged regex too
         match app_match(a, Os::CURRENT) {
-            Ok(AppMatch::Name(n)) => out.push(n),
+            Ok(AppMatch::Name(n) | AppMatch::Package(n)) => out.push(n),
             Ok(AppMatch::Regex(r)) => {
                 let body = r.trim_start_matches("(?i)^");
                 out.push(body.strip_suffix('$').unwrap_or(body).to_string());
@@ -533,9 +571,17 @@ fn dns_rule(parts: &Parts, match_all: bool, target: &Target, remote: Option<&str
 
 /// Full config for the main connection.
 pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
+    build_for(data, opts, Os::CURRENT)
+}
+
+/// [`build`] as it would be on `os`.
+pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
     let s = &data.settings;
+    // Android has no system proxy for other apps: only the VPN
+    let mode = if os == Os::Android { InboundMode::Tun } else { s.mode };
     let mut ctx = Ctx {
         data,
+        os,
         tag_of: HashMap::new(),
         used_tags: HashSet::new(),
         rule_sets: BTreeMap::new(),
@@ -576,7 +622,7 @@ pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
     if s.sniff {
         rules.push(json!({"action": "sniff"}));
     }
-    if s.mode == InboundMode::Tun {
+    if mode == InboundMode::Tun {
         rules.push(json!({"protocol": "dns", "action": "hijack-dns"}));
     }
     if s.bypass_lan {
@@ -596,7 +642,7 @@ pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
     // 3. DNS
     let mut dns_servers: Vec<Value> = Vec::new();
     let mut need_bootstrap = false;
-    let dot = opts.direct_dns_tls && s.mode == InboundMode::Tun && s.tun.strict_route;
+    let dot = opts.direct_dns_tls && mode == InboundMode::Tun && s.tun.strict_route;
     let direct_spec = match dns::dot_ip(&s.dns.direct) {
         Some(ip) if dot => format!("tls://{ip}"),
         _ => s.dns.direct.clone(),
@@ -686,7 +732,7 @@ pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
     }
 
     // 5. inbounds
-    let inbound = match s.mode {
+    let inbound = match mode {
         InboundMode::Tun => {
             let mut address = vec![json!("172.19.0.1/30")];
             if s.ipv6 {
@@ -706,7 +752,7 @@ pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
                 "stack": stack,
             });
             // macOS names tunnels itself (utunN)
-            if Os::CURRENT == Os::Windows {
+            if os == Os::Windows {
                 let name = if s.tun.interface_name.trim().is_empty() { "ReTunl" } else { s.tun.interface_name.trim() };
                 tun["interface_name"] = json!(name);
             }

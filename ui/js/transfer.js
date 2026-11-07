@@ -5,7 +5,7 @@ import {
   h, icon, invoke, busy, toast, errText, dialog, fmtDate, plural,
 } from './lib.js';
 import {
-  store, D, refresh, protoParts, copyText,
+  store, D, refresh, protoParts, copyText, here,
 } from './store.js';
 
 const servers = (n) => plural(n, 'сервер', 'сервера', 'серверов');
@@ -92,7 +92,7 @@ export function exportDialog() {
         if (!res) return; // save dialog cancelled
         dl.close();
         if (res.path) {
-          toast('Экспорт сохранён', { detail: res.path + '\nОткройте этот файл в ReTunl на другом компьютере: «Серверы» → «Добавить» → «Открыть файл…».', timeout: 10000 });
+          toast('Экспорт сохранён', { detail: res.path + `\nОткройте этот файл в ReTunl ${here().onOther}: «Серверы» → «Добавить» → «Открыть файл…».`, timeout: 10000 });
         } else {
           await copyText(res.text, 'Экспорт скопирован в буфер обмена');
         }
@@ -105,8 +105,8 @@ export function exportDialog() {
   const toFile = h('button.btn.primary', { onclick: (e) => run(e.currentTarget, true) }, icon('file'), 'Сохранить в файл');
   const toText = h('button.btn', { onclick: (e) => run(e.currentTarget, false) }, icon('copy'), 'Скопировать текстом');
   const dl = dialog({
-    title: 'Экспорт на другой компьютер',
-    lead: 'Выбранное шифруется паролем. На другом компьютере откройте файл в ReTunl или вставьте скопированный текст и введите тот же пароль.',
+    title: `Экспорт ${here().toOther}`,
+    lead: `Выбранное шифруется паролем. ${here().onOther[0].toUpperCase() + here().onOther.slice(1)} откройте файл в ReTunl или вставьте скопированный текст и введите тот же пароль.`,
     wide: true,
     body: [
       h('div.tr-groups',
@@ -199,14 +199,14 @@ function chooseDialog({ bundle: b, existing }) {
   }, 'Импортировать');
   const dl = dialog({
     title: 'Что импортировать',
-    lead: b.created_at ? `Экспорт от ${fmtDate(b.created_at)}. То, что уже есть на этом компьютере, не продублируется.` : 'То, что уже есть на этом компьютере, не продублируется.',
+    lead: b.created_at ? `Экспорт от ${fmtDate(b.created_at)}. То, что уже есть ${here().onThis}, не продублируется.` : `То, что уже есть ${here().onThis}, не продублируется.`,
     wide: true,
     body: [
       h('div.tr-groups',
         group('Подписки', subs),
         group('Серверы, добавленные вручную', manual),
         extra.length ? group('Ещё', extra, { all: false }) : null),
-      nothingNew ? h('p.field-note', 'Всё из этого экспорта уже есть на этом компьютере.') : null,
+      nothingNew ? h('p.field-note', `Всё из этого экспорта уже есть ${here().onThis}.`) : null,
       err,
     ],
     actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), go],

@@ -25,6 +25,9 @@ pub struct Preset {
     pub mac_apps: &'static [&'static str],
     #[serde(skip)]
     pub mac_description: Option<&'static str>,
+    /// the same apps on Android: package names
+    #[serde(skip)]
+    pub android_apps: &'static [&'static str],
     /// shown only on this system
     #[serde(skip)]
     pub only: Option<Os>,
@@ -60,6 +63,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Сайты и IP из реестра блокировок (списки runetfreedom). Удобно вместе с «Остальное — напрямую»: российские сайты и банки работают как обычно.",
         apps: &[],
         mac_apps: &[],
+        android_apps: &[],
         mac_description: None,
         only: None,
         domains: &[],
@@ -73,6 +77,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Домены .ru/.рф/.su, российские сервисы и IP-адреса России идут мимо VPN. Нужно, когда остальное идёт через VPN: Госуслуги и банки не любят зарубежные адреса.",
         apps: &[],
         mac_apps: &[],
+        android_apps: &[],
         mac_description: None,
         only: None,
         domains: &["ru", "su", "xn--p1ai", "xn--d1acj3b", "xn--80asehdb"],
@@ -86,6 +91,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Сайт, приложение и видеосерверы YouTube.",
         apps: &[],
         mac_apps: &[],
+        android_apps: &[],
         mac_description: None,
         only: None,
         domains: &[],
@@ -99,6 +105,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Приложение Discord целиком (включая голос) и discord.com в браузере.",
         apps: &["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe"],
         mac_apps: &["Discord.app", "Discord PTB.app", "Discord Canary.app"],
+        android_apps: &["com.discord"],
         mac_description: None,
         only: None,
         domains: &[],
@@ -112,6 +119,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Telegram Desktop, web.telegram.org и серверы Telegram.",
         apps: &["Telegram.exe", "AyuGram.exe", "Kotatogram.exe"],
         mac_apps: &["Telegram.app", "Telegram Desktop.app", "AyuGram.app", "Kotatogram.app"],
+        android_apps: &["org.telegram.messenger", "org.telegram.messenger.web", "org.thunderdog.challegram", "com.radolyn.ayugram"],
         mac_description: None,
         only: None,
         domains: &[],
@@ -125,6 +133,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Все сервисы Meta.",
         apps: &["WhatsApp.exe"],
         mac_apps: &["WhatsApp.app"],
+        android_apps: &["com.whatsapp", "com.whatsapp.w4b", "com.instagram.android", "com.facebook.katana", "com.facebook.orca"],
         mac_description: None,
         only: None,
         domains: &[],
@@ -138,6 +147,7 @@ pub const PRESETS: &[Preset] = &[
         description: "ChatGPT, Claude, Gemini и другие сервисы, недоступные из России.",
         apps: &["ChatGPT.exe", "Claude.exe"],
         mac_apps: &["ChatGPT.app", "Claude.app"],
+        android_apps: &["com.openai.chatgpt", "com.anthropic.claude"],
         mac_description: None,
         only: None,
         domains: &[],
@@ -151,6 +161,7 @@ pub const PRESETS: &[Preset] = &[
         description: "x.com, twitter.com и их серверы.",
         apps: &[],
         mac_apps: &[],
+        android_apps: &[],
         mac_description: None,
         only: None,
         domains: &[],
@@ -164,6 +175,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Chrome, Edge, Firefox, Яндекс Браузер, Opera, Brave, Vivaldi. Остальные программы идут как настроено ниже.",
         apps: &["chrome.exe", "msedge.exe", "firefox.exe", "browser.exe", "opera.exe", "brave.exe", "vivaldi.exe", "zen.exe"],
         mac_apps: &["Google Chrome.app", "Microsoft Edge.app", "Firefox.app", "Yandex.app", "Opera.app", "Brave Browser.app", "Vivaldi.app", "Zen.app", "Zen Browser.app", "Arc.app"],
+        android_apps: &["com.android.chrome", "com.microsoft.emmx", "org.mozilla.firefox", "com.yandex.browser", "com.opera.browser", "com.brave.browser", "com.vivaldi.browser", "com.sec.android.app.sbrowser"],
         mac_description: Some("Chrome, Edge, Firefox, Яндекс Браузер, Opera, Brave, Vivaldi, Arc. Safari сюда не входит: за него в сеть ходит служба macOS. Остальные программы идут как настроено ниже."),
         only: None,
         domains: &[],
@@ -177,6 +189,7 @@ pub const PRESETS: &[Preset] = &[
         description: "qBittorrent, uTorrent, BitTorrent, Transmission и др. не тратят трафик VPN.",
         apps: &["qbittorrent.exe", "uTorrent.exe", "BitTorrent.exe", "transmission-qt.exe", "tixati.exe", "Motrix.exe", "biglybt.exe"],
         mac_apps: &["qBittorrent.app", "Transmission.app", "Motrix.app", "BiglyBT.app", "Folx.app", "uTorrent Web.app"],
+        android_apps: &["org.proninyaroslav.libretorrent", "com.utorrent.client", "com.bittorrent.client", "com.delphicoder.flud"],
         mac_description: Some("qBittorrent, Transmission, Motrix, BiglyBT и др. не тратят трафик VPN."),
         only: None,
         domains: &[],
@@ -199,6 +212,7 @@ pub const PRESETS: &[Preset] = &[
             "GalaxyClient.exe",
         ],
         mac_apps: &["~/Library/Application Support/Steam/", "Steam.app", "Epic Games Launcher.app", "Battle.net.app", "Riot Client.app", "GOG Galaxy.app"],
+        android_apps: &[],
         mac_description: Some("Steam (и все игры из его папки), Epic, Battle.net, Riot, GOG — без лишней задержки."),
         only: None,
         domains: &[],
@@ -212,6 +226,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Рекламные и следящие домены не загружаются ни через VPN, ни напрямую.",
         apps: &[],
         mac_apps: &[],
+        android_apps: &[],
         mac_description: None,
         only: None,
         domains: &[],
@@ -225,6 +240,7 @@ pub const PRESETS: &[Preset] = &[
         description: "Домены сбора данных Microsoft. Может мешать обновлениям Windows.",
         apps: &[],
         mac_apps: &[],
+        android_apps: &[],
         mac_description: None,
         only: Some(Os::Windows),
         domains: &[],
@@ -244,17 +260,29 @@ impl Preset {
                 p.description = d;
             }
         }
+        if os == Os::Android {
+            p.apps = self.android_apps;
+        }
         p
+    }
+
+    /// Shown on `os`: a template made of programs needs those programs there.
+    pub fn fits(&self, os: Os) -> bool {
+        self.only.is_none_or(|o| o == os) && !(os == Os::Android && !self.apps.is_empty() && self.android_apps.is_empty())
     }
 }
 
 /// The gallery for this system.
 pub fn available() -> Vec<Preset> {
-    PRESETS.iter().filter(|p| p.only.is_none_or(|o| o == Os::CURRENT)).map(|p| p.for_os(Os::CURRENT)).collect()
+    available_for(Os::CURRENT)
+}
+
+pub fn available_for(os: Os) -> Vec<Preset> {
+    PRESETS.iter().filter(|p| p.fits(os)).map(|p| p.for_os(os)).collect()
 }
 
 pub fn find(id: &str) -> Option<Preset> {
-    PRESETS.iter().find(|p| p.id == id).map(|p| p.for_os(Os::CURRENT))
+    PRESETS.iter().find(|p| p.id == id && p.fits(Os::CURRENT)).map(|p| p.for_os(Os::CURRENT))
 }
 
 /// A new rule from a preset.
@@ -296,6 +324,22 @@ mod tests {
             }
         }
         assert_eq!(instantiate(&find("youtube").unwrap()).name, "YouTube");
+    }
+
+    #[test]
+    fn android_presets() {
+        let list = available_for(Os::Android);
+        let ids: Vec<_> = list.iter().map(|p| p.id).collect();
+        // Windows-only, and programs with no Android counterpart
+        assert!(!ids.contains(&"win-spy") && !ids.contains(&"games"), "{ids:?}");
+        assert!(ids.contains(&"telegram") && ids.contains(&"ru-blocked"));
+        for p in &list {
+            for a in p.apps {
+                assert!(crate::singbox::is_package_name(a), "{a}");
+            }
+        }
+        let tg = list.iter().find(|p| p.id == "telegram").unwrap();
+        assert!(tg.apps.contains(&"org.telegram.messenger"));
     }
 
     #[test]

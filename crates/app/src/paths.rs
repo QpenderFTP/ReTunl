@@ -5,6 +5,9 @@ use retunl_core::awg::CoreKind;
 /// The sing-box executable's file name.
 pub const CORE_EXE: &str = if cfg!(windows) { "sing-box.exe" } else { "sing-box" };
 
+/// What [`Paths::find_core`] gives on Android, where the core is part of the app.
+pub const BUILT_IN: &str = "встроено в приложение";
+
 /// Where ReTunl keeps things.
 ///
 /// * settings, servers, rules — `%APPDATA%\ReTunl\data.json`
@@ -20,7 +23,24 @@ pub struct Paths {
     pub portable: bool,
 }
 
+#[cfg(target_os = "android")]
+static ANDROID_DIRS: std::sync::OnceLock<(PathBuf, PathBuf)> = std::sync::OnceLock::new();
+
 impl Paths {
+    /// The folders for this app, created if missing. Android keeps them in
+    /// the app's private storage, which only the system tells us.
+    pub fn for_app(_app: &tauri::AppHandle) -> Paths {
+        #[cfg(target_os = "android")]
+        {
+            use tauri::Manager;
+            let path = _app.path();
+            let data = path.app_data_dir().unwrap_or_else(|_| PathBuf::from("/data/local/tmp/retunl"));
+            let local = path.app_local_data_dir().unwrap_or_else(|_| data.clone());
+            let _ = ANDROID_DIRS.set((data, local));
+        }
+        Paths::new()
+    }
+
     /// The folders, created if missing.
     pub fn new() -> Paths {
         let p = Paths::resolve(true);
@@ -36,6 +56,10 @@ impl Paths {
     }
 
     fn resolve(migrate: bool) -> Paths {
+        #[cfg(target_os = "android")]
+        if let Some((data, local)) = ANDROID_DIRS.get() {
+            return Paths { exe_dir: data.clone(), data_dir: data.clone(), local_dir: local.clone(), portable: false };
+        }
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
@@ -75,7 +99,11 @@ impl Paths {
     }
 
     /// sing-box: `RETUNL_CORE`, next to the app, or the downloaded copy.
+    /// On Android it is built into the app (both kinds: sing-box-lx).
     pub fn find_core(&self) -> Option<PathBuf> {
+        if cfg!(target_os = "android") {
+            return Some(PathBuf::from(BUILT_IN));
+        }
         if let Ok(p) = std::env::var("RETUNL_CORE") {
             let p = PathBuf::from(p);
             if p.exists() {
@@ -98,6 +126,9 @@ impl Paths {
 
     /// sing-box-lx: `RETUNL_CORE_LX`, `core-lx` next to the app, or the downloaded copy.
     pub fn find_lx_core(&self) -> Option<PathBuf> {
+        if cfg!(target_os = "android") {
+            return Some(PathBuf::from(BUILT_IN));
+        }
         if let Ok(p) = std::env::var("RETUNL_CORE_LX") {
             let p = PathBuf::from(p);
             if p.exists() {

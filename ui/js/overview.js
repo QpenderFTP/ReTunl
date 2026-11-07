@@ -6,12 +6,12 @@ import {
 import {
   store, D, S, ST, act, isOn, activeProfile, profile, toggleConnection, profileOptions, routePicker,
   routeKey, connBranch, protoParts, addressOf, importClipboard, downloadCore, paintCoreBar, coreNeed, hasLx,
-  isMac, osName,
+  isMac, isAndroid, osName, here,
 } from './store.js';
 
 const ROW = 74; // height of one branch row, px
-const W = 236; // width of the road drawing
-const JUNCTION = 64;
+// the road drawing: its width and where the roads part; a phone gets a shorter one
+const geometry = () => (matchMedia('(max-width: 720px)').matches ? { W: 124, J: 30 } : { W: 236, J: 64 });
 
 let refs = {};
 
@@ -74,7 +74,8 @@ function head(st) {
   const ph = PHASE[st.phase] || PHASE.stopped;
   let sub;
   if (st.phase === 'running') {
-    const how = st.mode === 'system_proxy' ? `Системный прокси ${osName()}` : 'Все программы через виртуальный адаптер';
+    const how = isAndroid() ? 'Все приложения через VPN Android'
+      : st.mode === 'system_proxy' ? `Системный прокси ${osName()}` : 'Все программы через виртуальный адаптер';
     sub = st.profile ? `${how}, сервер «${st.profile}»` : how;
     sub += st.core === 'extended' ? ', ядро sing-box-lx.' : '.';
   } else {
@@ -171,7 +172,8 @@ function controls() {
     h('div.field',
       h('label.field-label', { htmlFor: 'ov-server' }, 'Сервер'),
       sel, meta),
-    h('div.field',
+    // Android: there is only the system VPN
+    isAndroid() ? null : h('div.field',
       h('span.field-label', 'Что перехватывать'),
       seg([
         { value: 'tun', label: 'Все программы' },
@@ -207,9 +209,10 @@ function forkModel() {
   return [...map.values()].sort((a, b) => order(a.key) - order(b.key));
 }
 
-function roadPath(y, mid, end) {
-  const x0 = JUNCTION;
-  return `M${x0} ${mid} C${x0 + 64} ${mid} ${W - 132} ${y} ${W - 62} ${y} L${end} ${y}`;
+function roadPath({ W, J }, y, mid, end) {
+  const k = (W - J) / 172; // the curve was drawn for 172 px of road
+  const x = (d) => Math.round(J + d * k);
+  return `M${J} ${mid} C${x(64)} ${mid} ${x(40)} ${y} ${x(110)} ${y} L${end} ${y}`;
 }
 
 function forkPanel(st) {
@@ -217,8 +220,10 @@ function forkPanel(st) {
   const n = branches.length;
   const H = n * ROW;
   const mid = H / 2;
+  const g = geometry();
+  const { W } = g;
   const svg = s('svg', { class: 'fork-roads', viewBox: `0 0 ${W} ${H}`, width: W, height: H, 'aria-hidden': 'true' });
-  const paths = branches.map((b, i) => roadPath(ROW / 2 + i * ROW, mid, b.cls === 'block' ? W - 26 : W - 6));
+  const paths = branches.map((b, i) => roadPath(g, ROW / 2 + i * ROW, mid, b.cls === 'block' ? W - 26 : W - 6));
   branches.forEach((b, i) => svg.append(s('path', { d: paths[i], class: `road r-${b.cls}${b.final ? ' main' : ''}` })));
   branches.forEach((b, i) => {
     svg.append(s('path', { d: paths[i], class: 'road-mark' + (b.cls === 'block' ? ' still' : '') }));
@@ -227,16 +232,16 @@ function forkPanel(st) {
       svg.append(s('path', { d: `M${W - 12} ${y - 12} L${W - 12} ${y + 12}`, class: 'road-stop' }));
     }
   });
-  const trunk = `M4 ${mid} L${JUNCTION + 10} ${mid}`;
+  const trunk = `M4 ${mid} L${g.J + 10} ${mid}`;
   svg.append(s('path', { d: trunk, class: 'road trunk main' }));
   svg.append(s('path', { d: trunk, class: 'road-mark trunk-mark' }));
-  svg.append(s('circle', { cx: JUNCTION + 10, cy: mid, r: 9, class: 'junction' }));
+  svg.append(s('circle', { cx: g.J + 10, cy: mid, r: 9, class: 'junction' }));
 
   const fork = h('div.fork' + (st.phase === 'running' ? '.live' : '') + (st.phase === 'starting' ? '.starting' : ''),
     h('div.fork-origin',
-      h('span.origin-ic', icon('monitor')),
-      h('div.origin-title', 'Этот компьютер'),
-      h('div.origin-sub', S().mode === 'tun' ? 'все программы' : 'системный прокси')),
+      h('span.origin-ic', icon(isAndroid() ? 'phone' : 'monitor')),
+      h('div.origin-title', here().This),
+      h('div.origin-sub', isAndroid() ? 'все приложения' : S().mode === 'tun' ? 'все программы' : 'системный прокси')),
     h('div.fork-roads-wrap', svg),
     h('div.fork-branches', branches.map(branchEl)));
 

@@ -1,0 +1,7 @@
+{
+  "identifier": "mobile",
+  "description": "Android: scanning a QR code with the camera to add a server",
+  "platforms": ["android"],
+  "windows": ["main"],
+  "permissions": ["barcode-scanner:default"]
+}

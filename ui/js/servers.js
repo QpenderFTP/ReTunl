@@ -6,7 +6,7 @@ import {
 } from './lib.js';
 import {
   store, D, S, act, refresh, protoParts, addressOf, importText, importClipboard, importFile, copyText,
-  reportImport, coreNeed, hasLx, downloadCore, paintCoreBar,
+  reportImport, coreNeed, hasLx, downloadCore, paintCoreBar, isAndroid, scanQr,
 } from './store.js';
 import { exportDialog } from './transfer.js';
 
@@ -26,7 +26,7 @@ export const servers = {
       d.subscriptions.length > 0 && h('button.btn', { onclick: (e) => updateAll(e.currentTarget) }, icon('refresh'), 'Обновить подписки'),
       has && h('button.btn', { onclick: exportDialog, title: 'Зашифровать выбранные подписки и серверы паролем, чтобы перенести на другой компьютер' }, icon('lock'), 'Экспорт'),
       h('button.btn.primary', { onclick: addDialog }, icon('plus'), 'Добавить'),
-    ], has ? 'Выбранный сервер используется для правил «Через VPN». Ссылку или файл можно просто перетащить в окно.' : null));
+    ], has ? `Выбранный сервер используется для правил «Через VPN».${isAndroid() ? '' : ' Ссылку или файл можно просто перетащить в окно.'}` : null));
     lxBar = null;
     if (!hasLx() && d.profiles.some((p) => coreNeed(p) === 'extended')) {
       lxBar = h('div.progress', { hidden: true }, h('div.progress-bar'));
@@ -68,12 +68,14 @@ export const servers = {
 function emptyState() {
   return h('section.empty.drop',
     h('h2.empty-title', 'Серверов пока нет'),
-    h('p.empty-text', 'Добавьте ссылку на сервер VLESS, VMess, Trojan, Shadowsocks, Hysteria, TUIC, WireGuard, AmneziaWG, SOCKS или AnyTLS, ключ AmneziaVPN (vpn://), адрес подписки или файл WireGuard и AmneziaWG. Файл можно перетащить сюда, а ссылку — вставить сочетанием Ctrl+V.'),
+    h('p.empty-text', 'Добавьте ссылку на сервер VLESS, VMess, Trojan, Shadowsocks, Hysteria, TUIC, WireGuard, AmneziaWG, SOCKS или AnyTLS, ключ AmneziaVPN (vpn://), адрес подписки или файл WireGuard и AmneziaWG.'
+      + (isAndroid() ? ' Ссылку можно скопировать или показать QR-кодом.' : ' Файл можно перетащить сюда, а ссылку — вставить сочетанием Ctrl+V.')),
     h('div.empty-actions',
       h('button.btn.primary', { onclick: importClipboard }, icon('clipboard'), 'Вставить из буфера'),
+      isAndroid() && h('button.btn', { onclick: scanQr }, icon('qr'), 'Сканировать QR-код'),
       h('button.btn', { onclick: addDialog }, icon('plus'), 'Ввести ссылку или подписку'),
       h('button.btn', { onclick: importFile }, icon('file'), 'Открыть файл…'),
-      h('button.btn', { onclick: adapterDialog }, icon('plug'), 'Через другой VPN-клиент')));
+      !isAndroid() && h('button.btn', { onclick: adapterDialog }, icon('plug'), 'Через другой VPN-клиент')));
 }
 
 function group(sub, list) {
@@ -130,19 +132,20 @@ function row(p) {
       h('span.srv-meta', h('span.srv-proto', base), extra && h('span', extra), h('span.srv-addr', addressOf(p)),
         coreNeed(p) === 'extended' && !hasLx() ? h('span.tag.warn', { title: 'Официальный sing-box не умеет этот сервер' }, 'нужно ядро sing-box-lx') : null)),
     latencyEl(store.view.latency[p.id]),
-    h('button.icon-btn', {
+    h('button.icon-btn.srv-test', {
       'aria-label': 'Проверить задержку «' + p.name + '»', title: 'Проверить задержку',
       onclick: (e) => testLatency(e.currentTarget, [p.id]),
     }, icon('speed')),
     h('button.icon-btn', {
       'aria-label': 'Действия с сервером «' + p.name + '»', title: 'Ещё',
-      onclick: (e) => popMenu(e.currentTarget, [
+      onclick: (e) => { const more = e.currentTarget; popMenu(more, [
+        { label: 'Проверить задержку', icon: 'speed', run: () => testLatency(more, [p.id]) },
         { label: 'Переименовать', icon: 'edit', run: () => renameProfile(p) },
         { label: 'Настройки sing-box (JSON)', icon: 'file', run: () => editJson(p) },
         p.link && { label: 'Копировать ссылку', icon: 'copy', run: () => copyText(p.link, 'Ссылка скопирована') },
         '-',
         { label: 'Удалить', icon: 'trash', danger: true, run: () => removeProfile(p) },
-      ]),
+      ]); },
     }, icon('more', 'dots')));
 }
 
@@ -279,8 +282,9 @@ export function addDialog() {
       h('div.add-alt',
         h('span.add-alt-label', 'Или'),
         h('button.btn.small', { onclick: () => { dl.close(); importClipboard(); } }, icon('clipboard'), 'Вставить из буфера'),
+        isAndroid() && h('button.btn.small', { onclick: () => { dl.close(); scanQr(); } }, icon('qr'), 'Сканировать QR-код'),
         h('button.btn.small', { onclick: () => { dl.close(); importFile(); } }, icon('file'), 'Открыть файл…'),
-        h('button.btn.small', { onclick: () => { dl.close(); adapterDialog(); } }, icon('plug'), 'Через другой VPN-клиент')),
+        !isAndroid() && h('button.btn.small', { onclick: () => { dl.close(); adapterDialog(); } }, icon('plug'), 'Через другой VPN-клиент')),
     ],
     actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), submit],
   });

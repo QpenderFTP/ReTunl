@@ -1,10 +1,11 @@
-// Entry point: navigation rail, page switching, events and polling.
+// Entry point: navigation (a rail; on phones a tab bar), page switching, events and polling.
 
 import {
-  h, icon, logo, invoke, listen, fmtClock, now, closeMenu,
+  h, icon, logo, invoke, listen, fmtClock, now, closeMenu, menuOpen, dialog,
 } from './lib.js';
 import {
-  store, on, emit, refresh, ST, D, activeProfile, toggleConnection, adminDialog, isOn,
+  store, on, emit, refresh, ST, D, activeProfile, toggleConnection, adminDialog, isOn, isAndroid,
+  isScanning, cancelScan,
 } from './store.js';
 import { overview, speedProgress } from './overview.js';
 import { servers } from './servers.js';
@@ -16,6 +17,16 @@ import { settingsPage, applyTheme } from './settings.js';
 
 const PAGES = [overview, servers, myServers, rules, activity, logs, settingsPage];
 const page = () => PAGES.find((p) => p.id === store.page) || overview;
+const byId = (id) => PAGES.find((p) => p.id === id);
+
+// Phones: four sections in the tab bar, the rest under «Ещё»
+const TABS = ['overview', 'servers', 'rules', 'activity'];
+const MORE = [
+  ['hosts', 'Свои VPS: установка VPN и клиенты'],
+  ['logs', 'Сообщения ядра и ReTunl'],
+  ['settings', 'DNS, оформление, перенос на другое устройство'],
+];
+const phone = matchMedia('(max-width: 720px)');
 
 const PHASE_LABEL = {
   stopped: 'Отключено', starting: 'Подключаюсь…', running: 'Подключено', stopping: 'Отключаюсь…', failed: 'Ошибка',
@@ -37,12 +48,53 @@ function renderRail() {
 }
 
 function markNav() {
-  for (const p of PAGES) {
-    const b = document.getElementById('nav-' + p.id);
-    if (!b) continue;
-    if (p.id === store.page) b.setAttribute('aria-current', 'page');
-    else b.removeAttribute('aria-current');
-  }
+  const mark = (el, on) => { if (el) { if (on) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); } };
+  for (const p of PAGES) mark(document.getElementById('nav-' + p.id), p.id === store.page);
+  for (const id of TABS) mark(document.getElementById('tab-' + id), id === store.page);
+  mark(document.getElementById('tab-more'), !TABS.includes(store.page));
+}
+
+// ---------- tab bar (phones) ----------
+
+function renderTabbar() {
+  const tab = (id, label, ic, onclick) => h('button.tab', { id: 'tab-' + id, type: 'button', onclick },
+    h('span.tab-ic', icon(ic), id === 'overview' ? h('span.state-dot.tab-dot', { 'aria-hidden': 'true' }) : null),
+    h('span.tab-label', label));
+  document.getElementById('tabbar').replaceChildren(
+    ...TABS.map((id) => tab(id, byId(id).title, byId(id).icon, () => navigate(id))),
+    tab('more', 'Ещё', 'more', openMore));
+}
+
+function openMore() {
+  const dl = dialog({
+    title: 'Ещё',
+    body: h('div.more-list', MORE.map(([id, note]) => {
+      const p = byId(id);
+      const count = p.count ? p.count() : 0;
+      return h('button.more-item', {
+        type: 'button',
+        'aria-current': store.page === id ? 'page' : null,
+        onclick: () => { dl.close(); navigate(id); },
+      }, icon(p.icon), h('span.more-label', p.title), h('span.more-note', note), count ? h('span.nav-count', String(count)) : null);
+    })),
+  });
+}
+
+// ---------- Android's back button ----------
+
+// Called by the app (VpnPlugin.kt) on «Назад». "done": handled here;
+// anything else: ReTunl goes to the background, like Home (the VPN keeps running).
+function backButton() {
+  if (!isAndroid()) return;
+  window.retunlBack = () => {
+    const open = [...document.querySelectorAll('dialog[open]')].pop();
+    if (isScanning()) cancelScan();
+    else if (open) open.close();
+    else if (menuOpen()) closeMenu();
+    else if (store.page !== 'overview') navigate('overview');
+    else return 'background';
+    return 'done';
+  };
 }
 
 function updateCounts() {
@@ -59,6 +111,8 @@ function updateRailStatus() {
   const ph = st.phase;
   const ap = activeProfile();
   const server = ph === 'running' ? (st.profile || 'без сервера') : (ap ? ap.name : 'сервер не выбран');
+  const bar = document.getElementById('tabbar');
+  if (bar) bar.className = 'tabbar ph-' + ph;
   el.className = 'rail-status ph-' + ph;
   el.replaceChildren(
     h('div.rs-line',
@@ -194,7 +248,12 @@ async function init() {
     store.catalog = await invoke('get_catalog');
   } catch { /* keep the empty catalog */ }
   store.navigate = navigate;
+  applyTheme(); // again, now that the platform is known
+  renderTabbar();
   renderRail();
+  backButton();
+  // the fork is drawn for the width: redraw when a phone turns or a window narrows
+  phone.addEventListener('change', () => renderPage(true));
   loadHosts().then(updateCounts).catch(() => { /* shown when the page opens */ });
   let saved = 'overview';
   try { saved = localStorage.getItem('page') || 'overview'; } catch { /* storage off */ }

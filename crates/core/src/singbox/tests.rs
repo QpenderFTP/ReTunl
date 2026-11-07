@@ -55,6 +55,8 @@ fn selective_mode_and_rules() {
     let (apps, want) = match Os::CURRENT {
         Os::Windows => (["Discord.exe", "C:\\Games\\"], json!(["(?i)\\\\Discord\\.exe$", "(?i)^C:\\\\Games\\\\"])),
         Os::MacOs => (["Discord.app", "/Applications/Games/"], json!(["(?i)/Discord(?:\\.app/|$)", "(?i)^/Applications/Games/"])),
+        // covered by android_config
+        Os::Android => return,
     };
     discord.apps = apps.map(String::from).to_vec();
     discord.rule_sets = vec!["geosite-discord".into()];
@@ -108,6 +110,7 @@ fn match_all_makes_one_rule_and_no_dns_rule() {
     let chrome = match Os::CURRENT {
         Os::Windows => "(?i)\\\\chrome\\.exe$",
         Os::MacOs => "(?i)/chrome(?:\\.app/|$)",
+        Os::Android => return,
     };
     assert_eq!(
         c["route"]["rules"][3],
@@ -274,4 +277,36 @@ fn strict_tun_sends_direct_dns_over_tls() {
     d.settings.mode = InboundMode::Tun;
     d.settings.dns.direct = "192.168.0.1".into();
     assert_eq!(build(&d, &tls).unwrap().config["dns"]["servers"][0], json!({"type": "udp", "tag": DNS_DIRECT, "server": "192.168.0.1"}));
+}
+
+#[test]
+fn android_config() {
+    let mut d = base();
+    // a proxy-mode setting from a computer: a phone still gets the VPN
+    d.settings.mode = InboundMode::SystemProxy;
+    let mut r = rule("Telegram", Route::Direct);
+    r.apps = vec!["org.telegram.messenger".into(), " org.telegram.messenger ".into(), "com.whatsapp".into()];
+    d.rules.push(r);
+    let mut desk = rule("С компьютера", Route::Block);
+    desk.apps = vec!["Telegram.exe".into()];
+    d.rules.push(desk);
+    let b = build_for(&d, &opts(), Os::Android).unwrap();
+    let c = &b.config;
+    let tun = &c["inbounds"][0];
+    assert_eq!(tun["type"], "tun");
+    assert!(tun.get("interface_name").is_none(), "Android names the tunnel itself");
+    assert!(tun.get("set_system_proxy").is_none());
+    let rules = c["route"]["rules"].as_array().unwrap();
+    assert!(rules.iter().any(|r| r["action"] == "hijack-dns"));
+    let tg = rules.iter().find(|r| r.get("package_name").is_some_and(|p| p[0] == "org.telegram.messenger")).unwrap();
+    assert_eq!(tg["package_name"], json!(["org.telegram.messenger", "com.whatsapp"]));
+    assert_eq!(tg["outbound"], TAG_DIRECT);
+    assert!(rules.iter().all(|r| r.get("process_path_regex").is_none()));
+    // a computer program stays a (never matching) package name and the user is told
+    let desk = rules.iter().find(|r| r["action"] == "reject" && r.get("package_name").is_some()).unwrap();
+    assert_eq!(desk["package_name"], json!(["Telegram.exe"]));
+    assert!(b.warnings.iter().any(|w| w.contains("С компьютера")), "{:?}", b.warnings);
+
+    assert!(is_package_name("org.telegram.messenger") && is_package_name("com.a_b.c9"));
+    assert!(!is_package_name("Telegram.exe.") && !is_package_name("telegram") && !is_package_name("1a.b") && !is_package_name(r"C:\x.exe"));
 }

@@ -31,6 +31,10 @@ const CORE_ASSETS: [(&str, &str); 2] = [
     ("sing-box-1.14.4-lx.32-darwin-amd64.tar.gz", "f81fc2b73c5f89d3f6a2069fbcde0e716b8204016593ff155eaec0cc26063c9f"),
 ];
 
+/// Android: the core is built into the app, nothing is downloaded.
+#[cfg(target_os = "android")]
+const CORE_ASSETS: [(&str, &str); 2] = [("", ""), ("", "")];
+
 /// Download address and checksum of a core for this system.
 pub fn core_asset(kind: CoreKind) -> (String, &'static str) {
     let (base, (file, sha)) = match kind {

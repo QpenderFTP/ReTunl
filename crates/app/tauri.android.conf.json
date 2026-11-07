@@ -1,0 +1,18 @@
+{
+  "identifier": "app.retunl",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ReTunl",
+        "visible": true,
+        "dragDropEnabled": false
+      }
+    ]
+  },
+  "bundle": {
+    "android": {
+      "minSdkVersion": 26
+    }
+  }
+}

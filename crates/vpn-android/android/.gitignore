@@ -1,0 +1,4 @@
+/.tauri
+/build
+/libs
+/src/main/jniLibs

@@ -27,7 +27,22 @@ pub fn admin_servers(st: St<'_>) -> Vec<ServerView> {
 
 #[tauri::command]
 pub async fn admin_add(st: St<'_>, form: AddForm) -> R<ServerView> {
-    st.admin.add(form).await
+    let copy = form.key_path.clone().filter(|p| is_key_copy(&st, p));
+    let r = st.admin.add(form).await;
+    // the key is stored sealed now: the plain copy from the picker goes
+    if let Some(p) = copy {
+        let _ = std::fs::remove_file(p);
+    }
+    r
+}
+
+/// Android hands picked files out as links: [`admin_pick_key`] copies the key here.
+fn key_copy(st: &AppState) -> std::path::PathBuf {
+    st.paths.run_dir().join("picked-ssh-key")
+}
+
+fn is_key_copy(st: &AppState, path: &str) -> bool {
+    std::path::Path::new(path) == key_copy(st)
 }
 
 #[tauri::command]
@@ -96,9 +111,10 @@ pub fn admin_trust_key(st: St<'_>, id: String) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn admin_pick_key(app: AppHandle) -> R<Option<String>> {
+pub async fn admin_pick_key(app: AppHandle, st: St<'_>) -> R<Option<String>> {
+    let a = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        let mut d = app.dialog().file().set_title("SSH-ключ");
+        let mut d = a.dialog().file().set_title("SSH-ключ");
         if let Some(home) = dirs::home_dir() {
             d = d.set_directory(home.join(".ssh"));
         }
@@ -106,7 +122,15 @@ pub async fn admin_pick_key(app: AppHandle) -> R<Option<String>> {
     })
     .await
     .map_err(|e| e.to_string())?;
-    Ok(picked.and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+    let Some(picked) = picked else { return Ok(None) };
+    if let Ok(p) = picked.clone().into_path() {
+        return Ok(Some(p.to_string_lossy().into_owned()));
+    }
+    // a content:// link: keep a private copy until the server is added
+    let bytes = crate::files::read(&app, &picked)?;
+    let copy = key_copy(&st);
+    std::fs::write(&copy, bytes).map_err(|e| format!("Не удалось сохранить ключ: {e}"))?;
+    Ok(Some(copy.to_string_lossy().into_owned()))
 }
 
 /// Add a client made on the server to this computer's servers.
@@ -132,12 +156,13 @@ pub fn admin_use_client(st: St<'_>, text: String, name: String) -> R<String> {
 
 #[tauri::command]
 pub async fn admin_save_conf(app: AppHandle, name: String, text: String) -> R<Option<String>> {
+    let a = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
-        app.dialog().file().set_title("Сохранить настройки клиента").set_file_name(&name).add_filter("WireGuard", &["conf"]).blocking_save_file()
+        a.dialog().file().set_title("Сохранить настройки клиента").set_file_name(&name).add_filter("WireGuard", &["conf"]).blocking_save_file()
     })
     .await
     .map_err(|e| e.to_string())?;
-    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
-    std::fs::write(&path, text).map_err(|e| format!("Не удалось сохранить файл: {e}"))?;
-    Ok(Some(path.to_string_lossy().into_owned()))
+    let Some(picked) = picked else { return Ok(None) };
+    crate::files::write(&app, &picked, text.as_bytes())?;
+    Ok(Some(crate::files::shown(&picked)))
 }

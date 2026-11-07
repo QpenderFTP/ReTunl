@@ -1,0 +1,15 @@
+[package]
+name = "tauri-plugin-retunl-vpn"
+description = "The Android VPN service of ReTunl: runs sing-box (libbox) inside VpnService"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "tauri-plugin-retunl-vpn"
+
+[dependencies]
+tauri = { version = "2", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

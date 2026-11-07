@@ -3,7 +3,6 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::process::Child;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -12,7 +11,7 @@ use retunl_core::awg::CoreKind;
 use retunl_core::singbox::{self, BuildOptions};
 use retunl_core::util::now_unix;
 use retunl_core::{AppData, InboundMode, Route};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::blocks::{BlockStats, Blocks};
@@ -27,7 +26,7 @@ const LOG_CAPACITY: usize = 4000;
 /// The macOS core log file is emptied once it grows past this.
 const LOG_FILE_LIMIT: u64 = 8 << 20;
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Stopped,
@@ -37,7 +36,7 @@ pub enum Phase {
     Failed,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Status {
     pub phase: Phase,
     pub since: Option<i64>,
@@ -121,11 +120,13 @@ struct Session {
 
 struct Inner {
     status: Status,
-    child: Option<Child>,
+    child: Option<sys::Proc>,
     stop: Option<sys::Stop>,
     session: Option<Arc<Session>>,
     stopping: bool,
     last_sample: Option<(Instant, u64, u64)>,
+    /// Why the last connection ended, when the core said so itself.
+    end_error: Option<String>,
 }
 
 type Listener = Box<dyn Fn(Status) + Send + Sync>;
@@ -163,6 +164,7 @@ impl Engine {
                 session: None,
                 stopping: false,
                 last_sample: None,
+                end_error: None,
             }),
             logs: Mutex::new((VecDeque::with_capacity(LOG_CAPACITY), 1)),
             tail: Mutex::new(None),
@@ -370,6 +372,9 @@ impl Engine {
 
     async fn start_inner(self: &Arc<Self>, req: StartRequest) -> Result<(), String> {
         let StartRequest { mut data, paths, http, elevated } = req;
+        if cfg!(target_os = "android") {
+            data.settings.mode = InboundMode::Tun;
+        }
         let mode = data.settings.mode;
         if mode == InboundMode::Tun && !elevated && sys::TUN_NEEDS_RESTART {
             return Err(NEED_ADMIN.into());
@@ -449,28 +454,28 @@ impl Engine {
         std::fs::write(&cfg_path, json).map_err(|e| format!("Не удалось записать конфигурацию: {e}"))?;
 
         self.set_step("Проверяю конфигурацию…");
-        let check = {
+        {
             let (core, cfg, dir) = (core.clone(), cfg_path.clone(), paths.run_dir());
-            tokio::task::spawn_blocking(move || {
-                sys::quiet(&core).args(["check", "--disable-color", "-c"]).arg(&cfg).current_dir(&dir).output()
-            })
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("Не удалось запустить sing-box: {e}"))?
-        };
-        if !check.status.success() {
-            let err = String::from_utf8_lossy(&check.stderr);
-            let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
-            return Err(format!("sing-box не принял конфигурацию: {}", humanize(&line)));
+            tokio::task::spawn_blocking(move || check_config(&core, &cfg, &dir))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|line| format!("sing-box не принял конфигурацию: {}", humanize(&line)))?;
         }
 
         let tun = mode == InboundMode::Tun;
         self.set_step(match mode {
+            InboundMode::Tun if cfg!(target_os = "android") => "Включаю VPN…",
             InboundMode::Tun if !sys::TUN_NEEDS_RESTART && !elevated => "Введите пароль администратора macOS…",
             InboundMode::Tun => "Поднимаю виртуальный адаптер…",
             InboundMode::SystemProxy => "Включаю системный прокси…",
         });
-        let sys::Launch { mut child, log, slow_start, stop } = sys::launch_core(&core, &cfg_path, &paths.run_dir(), tun && !elevated)?;
+        // Android may first ask the user to allow the VPN: off the async threads
+        let sys::Launch { mut child, log, slow_start, stop } = {
+            let (core, cfg, dir) = (core.clone(), cfg_path.clone(), paths.run_dir());
+            tokio::task::spawn_blocking(move || sys::launch_core(&core, &cfg, &dir, tun && !elevated))
+                .await
+                .map_err(|e| e.to_string())??
+        };
         if let Some(job) = &self.job {
             job.assign(&child);
         }
@@ -510,6 +515,7 @@ impl Engine {
             g.session = Some(session.clone());
             g.stopping = false;
             g.last_sample = None;
+            g.end_error = None;
         }
         if let Some(log) = log {
             self.start_tail(log, id);
@@ -523,7 +529,7 @@ impl Engine {
         let mut asked = slow_start;
         loop {
             if self.lock().session.as_ref().map(|s| s.id) != Some(id) {
-                return Err(self.last_error().unwrap_or_else(|| "sing-box завершился при запуске.".into()));
+                return Err(self.start_failure());
             }
             if session.clash.alive().await {
                 break;
@@ -541,7 +547,7 @@ impl Engine {
         // late start errors (e.g. TUN creation) end the process right away
         tokio::time::sleep(Duration::from_millis(400)).await;
         if self.lock().session.as_ref().map(|s| s.id) != Some(id) {
-            return Err(self.last_error().unwrap_or_else(|| "sing-box завершился при запуске.".into()));
+            return Err(self.start_failure());
         }
 
         let mut st = Status::new(Phase::Running);
@@ -550,15 +556,67 @@ impl Engine {
         st.core = Some(core_kind);
         st.profile = describe_route(&data);
         st.warnings = warnings;
+        #[cfg(target_os = "android")]
+        save_session(&paths, Saved {
+            port: data.settings.controller_port,
+            secret: secret.clone(),
+            signatures: session.signatures.clone(),
+            status: st.clone(),
+        });
         self.set_status(st);
         self.log_app("INFO", "Подключено");
         Ok(())
     }
 
+    fn start_failure(&self) -> String {
+        let told = self.lock().end_error.take();
+        told.or_else(|| self.last_error()).unwrap_or_else(|| "sing-box завершился при запуске.".into())
+    }
+
+    /// Android keeps the VPN when the window goes; a new window takes over
+    /// the connection that is still up.
+    #[cfg(target_os = "android")]
+    pub fn adopt_running(self: &Arc<Self>, paths: &Paths) {
+        let file = paths.run_dir().join("session.json");
+        if !sys::main_running() {
+            let _ = std::fs::remove_file(&file);
+            return;
+        }
+        let Some(saved) = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Saved>(&b).ok()) else {
+            // nothing to talk to: stop it rather than leave it unmanaged
+            let _ = sys::Proc::new(sys::MAIN).kill();
+            return;
+        };
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let session = Arc::new(Session {
+            id,
+            clash: Clash::new(saved.port, &saved.secret),
+            mode: InboundMode::Tun,
+            mixed_port: 0,
+            signatures: saved.signatures,
+        });
+        {
+            let mut g = self.lock();
+            g.child = Some(sys::Proc::new(sys::MAIN));
+            g.stop = Some(sys::Stop);
+            g.session = Some(session);
+            g.stopping = false;
+            g.last_sample = None;
+            g.end_error = None;
+        }
+        self.start_tail(paths.run_dir().join("core.log"), id);
+        let me = self.clone();
+        std::thread::spawn(move || me.watch(id));
+        self.set_status(saved.status);
+        self.log_app("INFO", "VPN уже был включён — продолжаю это подключение");
+    }
+
     /// Reap the process; on an unexpected exit report the error.
     fn watch(self: Arc<Self>, id: u64) {
+        // Android asks the VPN plugin, a trip through the UI thread: less often
+        let every = Duration::from_millis(if cfg!(target_os = "android") { 1000 } else { 250 });
         loop {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(every);
             let mut g = self.lock();
             if g.session.as_ref().map(|s| s.id) != Some(id) {
                 return;
@@ -571,7 +629,8 @@ impl Engine {
             let session = g.session.take().expect("session");
             g.child = None;
             g.stop = None;
-            let stopping = g.stopping;
+            // Android: «Отключить» in the notification is a normal stop too
+            let stopping = g.stopping || exit_clean(&code);
             drop(g);
             // the last lines explain why it ended
             self.drain_tail();
@@ -583,8 +642,11 @@ impl Engine {
                 self.log_app("INFO", "Отключено");
                 self.set_status(Status::new(Phase::Stopped));
             } else {
-                let msg = self.last_error().unwrap_or_else(|| format!("sing-box неожиданно завершился ({code})."));
+                let msg = exit_error(&code)
+                    .or_else(|| self.last_error())
+                    .unwrap_or_else(|| format!("sing-box неожиданно завершился ({code})."));
                 self.log_app("ERROR", &format!("Соединение прервано: {msg}"));
+                self.lock().end_error = Some(msg.clone());
                 let mut s = Status::new(Phase::Failed);
                 s.error = Some(msg);
                 self.set_status(s);
@@ -734,6 +796,9 @@ fn conn_view(c: &Value, session: &Session) -> Conn {
         _ => String::new(),
     };
     let path = s(&md["processPath"]);
+    // Android: "com.example.app (its user)", the package is what rules and icons know
+    #[cfg(target_os = "android")]
+    let path = path.split(" (").next().unwrap_or_default().to_string();
     let process = sys::program_name(&path);
     let outbound = c["chains"].as_array().and_then(|a| a.first()).map(s).unwrap_or_default();
     let raw_rule = s(&c["rule"]);
@@ -811,6 +876,56 @@ fn mode_label(m: InboundMode) -> &'static str {
 }
 
 /// Plain-language versions of common sing-box errors.
+#[cfg(target_os = "android")]
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    port: u16,
+    secret: String,
+    signatures: Vec<(String, Vec<String>)>,
+    status: Status,
+}
+
+#[cfg(target_os = "android")]
+fn save_session(paths: &Paths, saved: Saved) {
+    if let Ok(b) = serde_json::to_vec(&saved) {
+        let _ = std::fs::write(paths.run_dir().join("session.json"), b);
+    }
+}
+
+/// sing-box's own check of the config; the last error line if it fails.
+#[cfg(not(target_os = "android"))]
+fn check_config(core: &std::path::Path, cfg: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
+    let out = sys::quiet(core)
+        .args(["check", "--disable-color", "-c"])
+        .arg(cfg)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("Не удалось запустить sing-box: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string())
+}
+
+#[cfg(target_os = "android")]
+fn check_config(_core: &std::path::Path, cfg: &std::path::Path, _dir: &std::path::Path) -> Result<(), String> {
+    sys::check_config(cfg)
+}
+
+#[cfg(not(target_os = "android"))]
+fn exit_clean(_: &std::process::ExitStatus) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "android"))]
+fn exit_error(_: &std::process::ExitStatus) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "android")]
+use sys::{clean_exit as exit_clean, exit_error};
+
 pub fn humanize(err: &str) -> String {
     let e = err.trim();
     let lower = e.to_lowercase();

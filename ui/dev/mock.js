@@ -69,6 +69,9 @@
   let autostart = { enabled: false, elevated: false };
   // #mac: the macOS build (its texts, no restart as admin)
   const MAC = /mac/.test(location.hash);
+  // #android: the phone build (packages instead of programs, the core built in)
+  const ANDROID = /android/.test(location.hash);
+  if (ANDROID) { core = 'встроено'; lxCore = 'встроено'; }
   let logs = [];
   let seq = 0;
   let totals = { up: 0, down: 0 };
@@ -84,7 +87,7 @@
     logs.push({ seq: ++seq, time: d.toTimeString().slice(0, 8), level, source, text });
     if (logs.length > 4000) logs.shift();
   };
-  log('info', 'ReTunl 0.1.0 запущен', 'app');
+  log('info', 'ReTunl 0.2.0 запущен', 'app');
 
   const setStatus = (s) => { status = { ...status, ...s }; emit('status', clone(status)); };
 
@@ -98,6 +101,20 @@
     ['firefox.exe', 'C:\\Program Files\\Mozilla Firefox\\firefox.exe'],
     ['explorer.exe', 'C:\\Windows\\explorer.exe'],
   ];
+  const APPS = [
+    ['Chrome', 'com.android.chrome', false], ['Discord', 'com.discord', false], ['Telegram', 'org.telegram.messenger', false],
+    ['YouTube', 'com.google.android.youtube', false], ['Steam', 'com.valvesoftware.android.steam.community', false],
+    ['Сбербанк Онлайн', 'ru.sberbankmobile', false], ['Firefox', 'org.mozilla.firefox', false],
+    ['Сервисы Google Play', 'com.google.android.gms', true], ['Android System WebView', 'com.google.android.webview', true],
+  ];
+  if (ANDROID) {
+    PROCS.splice(0, PROCS.length, ['chrome.exe', 'com.android.chrome'], ['Discord.exe', 'com.discord'], ['Telegram.exe', 'org.telegram.messenger'],
+      ['steam.exe', 'com.valvesoftware.android.steam.community'], ['svchost.exe', 'com.google.android.gms'], ['Code.exe', 'org.mozilla.firefox'],
+      ['firefox.exe', 'org.mozilla.firefox']);
+    const pkg = { 'Discord.exe': 'com.discord', 'Update.exe': 'com.discord', 'Telegram.exe': 'org.telegram.messenger', 'chrome.exe': 'com.android.chrome' };
+    for (const r of data.rules) r.apps = [...new Set(r.apps.map((a) => pkg[a] || 'com.valvesoftware.android.steam.community'))];
+    for (const pr of data.presets) pr.apps = ['us.zoom.videomeetings'];
+  }
   const HOSTS = [
     ['chrome.exe', 'www.youtube.com', 'YouTube', 'Нидерланды Reality'],
     ['chrome.exe', 'rr3---sn-4g5e6nsz.googlevideo.com', 'YouTube', 'Нидерланды Reality'],
@@ -117,7 +134,7 @@
     const path = (PROCS.find((p) => p[0] === proc) || [proc, ''])[1];
     const isIp = /^[\d.]+$/.test(host);
     return {
-      id: id(), process: proc, path, host: isIp ? '' : host, ip: isIp ? host : '203.0.113.' + (i % 250), port: host.startsWith('192.') ? 53 : 443,
+      id: id(), process: ANDROID ? path : proc, path, host: isIp ? '' : host, ip: isIp ? host : '203.0.113.' + (i % 250), port: host.startsWith('192.') ? 53 : 443,
       network: i % 5 === 0 ? 'udp' : 'tcp', outbound, rule, up: Math.floor(Math.random() * 40000), down: Math.floor(Math.random() * 900000),
       start: new Date(Date.now() - Math.random() * 600000).toISOString(),
     };
@@ -336,7 +353,7 @@
 
   const handlers = {
     ...adminHandlers,
-    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.1.0', data_dir: MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
+    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.0', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });
@@ -490,7 +507,7 @@
     close_all_connections: () => { conns = []; },
     get_logs: ({ after }) => ({ lines: logs.filter((l) => l.seq > after), last: seq }),
     clear_logs: () => { logs = []; },
-    list_processes: () => PROCS.map(([name, path]) => ({ name, path })).concat([{ name: 'qbittorrent.exe', path: 'C:\\Program Files\\qBittorrent\\qbittorrent.exe' }]),
+    list_processes: () => (ANDROID ? APPS.map(([name, path, system]) => ({ name, path, system })) : PROCS.map(([name, path]) => ({ name, path })).concat([{ name: 'qbittorrent.exe', path: 'C:\\Program Files\\qBittorrent\\qbittorrent.exe' }])),
     get_icons: ({ paths }) => Object.fromEntries(paths.map((p) => [p, null])),
     pick_exe: () => 'C:\\Games\\Genshin Impact\\GenshinImpact.exe',
     pick_folder: () => 'C:\\Games\\',

@@ -4,7 +4,7 @@ import {
   h, icon, invoke, seg, pageHead, popMenu, fmtBytes, fmtClock, toast, errorToast, plural,
 } from './lib.js';
 import {
-  store, ST, connBranch, appIcon, loadIcons, connect, profileByTag,
+  store, ST, emit, connBranch, appIcon, loadIcons, connect, profileByTag, isAndroid, appLabel, ensureProcIndex,
 } from './store.js';
 import { openRuleEditor } from './rules.js';
 
@@ -16,6 +16,9 @@ let rows = new Map();
 let tbody = null;
 let empty = null;
 let pauseBtn = null;
+
+/** Android: the app's title instead of its package. */
+const procName = (c) => (isAndroid() && c.process ? appLabel(c.process) : c.process);
 
 export const activity = {
   id: 'activity',
@@ -75,6 +78,8 @@ export const activity = {
         el.replaceWith(fresh);
       }
     }
+    // Android: app titles arrive with the app list, after the rows
+    if (isAndroid()) for (const el of tbody.querySelectorAll('span.c-proc[data-pkg]')) if (el.dataset.pkg) el.textContent = appLabel(el.dataset.pkg);
   },
   leave() {
     tbody = null;
@@ -99,7 +104,7 @@ function matches(c) {
   if (routeFilter === 'direct' && b !== 'direct') return false;
   if (routeFilter === 'tunnel' && b === 'direct') return false;
   if (!query) return true;
-  return [c.process, c.host, c.ip, c.rule, c.outbound].some((x) => x && x.toLowerCase().includes(query));
+  return [c.process, procName(c), c.host, c.ip, c.rule, c.outbound].some((x) => x && x.toLowerCase().includes(query));
 }
 
 function routeChipFor(c) {
@@ -146,13 +151,15 @@ function update() {
   empty.hidden = view.length > 0;
   empty.textContent = (store.conns || []).length ? 'Под фильтр ничего не подходит.' : 'Соединений пока нет.';
   loadIcons(list.map((c) => c.path));
+  // Android: app titles come with the app list
+  if (isAndroid() && !store.procIndex) ensureProcIndex().then(() => { if (store.page === 'activity') emit('icons'); });
 }
 
 function connItem(c) {
   return {
     key: c.id,
     build: () => h('tr',
-      h('td.c-app', iconFor(c), h('span.c-proc', { title: c.path || '' }, c.process || 'система')),
+      h('td.c-app', iconFor(c), h('span.c-proc', { title: c.path || '', data: { pkg: c.process || '' } }, procName(c) || 'система')),
       h('td.c-dest', h('div.cell-flex',
         h('span.c-host', { title: c.ip ? `${c.host || c.ip} (${c.ip})` : c.host }, c.host || c.ip),
         h('span.c-port', ':' + c.port), h('span.c-net', c.network))),
@@ -191,7 +198,7 @@ function appItems(list) {
   return groups.map((g) => ({
     key: g.key,
     build: () => h('tr',
-      h('td.c-app', iconFor(g.sample), h('span.c-proc', { title: g.sample.path || '' }, g.sample.process || 'система')),
+      h('td.c-app', iconFor(g.sample), h('span.c-proc', { title: g.sample.path || '', data: { pkg: g.sample.process || '' } }, procName(g.sample) || 'система')),
       h('td.num.c-count'),
       h('td.c-dest.c-hosts'),
       h('td.c-route'),
@@ -222,14 +229,14 @@ const isIp = (x) => /^[\d.]+$/.test(x) || x.includes(':');
 
 function ruleFor(c, what) {
   const route = connBranch(c) === 'direct' ? { kind: 'proxy' } : { kind: 'direct' };
-  if (what === 'app') openRuleEditor({ name: (c.process || '').replace(/\.exe$/i, ''), apps: [c.process || c.path], route });
+  if (what === 'app') openRuleEditor({ name: (procName(c) || '').replace(/\.exe$/i, ''), apps: [c.process || c.path], route });
   if (what === 'site') { const d = rootDomain(c.host); openRuleEditor({ name: d, domains: [d], route }); }
   if (what === 'ip') openRuleEditor({ name: c.ip, ips: [c.ip], route });
 }
 
 function ruleMenu(anchor, c) {
   popMenu(anchor, [
-    c.process && { label: `Для программы ${c.process}`, icon: 'servers', run: () => ruleFor(c, 'app') },
+    c.process && { label: `${isAndroid() ? 'Для приложения' : 'Для программы'} ${procName(c)}`, icon: 'servers', run: () => ruleFor(c, 'app') },
     c.host && !isIp(c.host) && { label: `Для сайта ${rootDomain(c.host)}`, icon: 'external', run: () => ruleFor(c, 'site') },
     c.ip && { label: `Для адреса ${c.ip}`, icon: 'list', run: () => ruleFor(c, 'ip') },
   ]);

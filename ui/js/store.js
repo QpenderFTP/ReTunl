@@ -15,6 +15,7 @@ export const store = {
   startupWarning: null,
   icons: new Map(), // exe path -> data URL | null
   procIndex: null, // lower-case exe name -> path
+  appNames: new Map(), // Android: package -> what the phone calls the app
   procIndexAt: 0,
   subUpdating: new Set(),
   openBundle: null, // set by transfer.js
@@ -187,14 +188,24 @@ export function routePicker(route, onChange, { label = 'Маршрут' } = {}) 
 // ---------- the system ----------
 
 export const isMac = () => !!store.view && store.view.platform === 'macos';
-/** "Windows" or "macOS", for texts. */
-export const osName = () => (isMac() ? 'macOS' : 'Windows');
+export const isAndroid = () => !!store.view && store.view.platform === 'android';
+/** "Windows", "macOS" or "Android", for texts. */
+export const osName = () => (isMac() ? 'macOS' : isAndroid() ? 'Android' : 'Windows');
+/** How texts name the device ReTunl runs on. */
+export const here = () => (isAndroid()
+  ? { This: 'Этот телефон', this: 'этот телефон', onThis: 'на этом телефоне', toOther: 'на другое устройство', onOther: 'на другом устройстве' }
+  : { This: 'Этот компьютер', this: 'этот компьютер', onThis: 'на этом компьютере', toOther: 'на другой компьютер', onOther: 'на другом компьютере' });
+/** An Android app id: org.telegram.messenger */
+export const isPackage = (a) => /^[a-z]\w*(\.[a-z]\w*)+$/i.test(a || '') && !/\.(exe|app)$/i.test(a);
 
 // ---------- apps and icons ----------
 
 export const baseName = (p) => (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
 export const isFolder = (a) => /[\\/]$/.test(a);
-export const appLabel = (a) => (isFolder(a) ? 'папка ' + baseName(a) : baseName(a).replace(/\.(exe|app)$/i, ''));
+export function appLabel(a) {
+  if (isAndroid() && isPackage(a)) return store.appNames.get(a) || a;
+  return isFolder(a) ? 'папка ' + baseName(a) : baseName(a).replace(/\.(exe|app)$/i, '');
+}
 
 export async function ensureProcIndex(maxAge = 60) {
   if (store.procIndex && Date.now() / 1000 - store.procIndexAt < maxAge) return store.procIndex;
@@ -202,6 +213,8 @@ export async function ensureProcIndex(maxAge = 60) {
     const list = await invoke('list_processes');
     const idx = new Map();
     for (const p of list) if (p.path && !idx.has(p.name.toLowerCase())) idx.set(p.name.toLowerCase(), p.path);
+    // Android: the name is the app's title, the path its package
+    if (isAndroid()) for (const p of list) store.appNames.set(p.path, p.name);
     store.procIndex = idx;
     store.procIndexAt = Date.now() / 1000;
   } catch {
@@ -213,7 +226,7 @@ export async function ensureProcIndex(maxAge = 60) {
 /** Fetch icons for exe paths we have not seen yet. Emits 'icons' when new ones arrive. */
 export async function loadIcons(paths) {
   // Windows: any .exe; macOS: anything inside an .app bundle
-  const iconic = (p) => (isMac() ? /\.app(\/|$)/i.test(p) : /\.exe$/i.test(p));
+  const iconic = (p) => (isAndroid() ? isPackage(p) : isMac() ? /\.app(\/|$)/i.test(p) : /\.exe$/i.test(p));
   const need = [...new Set(paths.filter((p) => p && iconic(p) && !store.icons.has(p)))];
   if (!need.length) return false;
   need.forEach((p) => store.icons.set(p, null));
@@ -234,7 +247,7 @@ export async function loadIcons(paths) {
 /** Path to look an icon up by: the exe itself, or a running process with that name. */
 export function iconPath(app) {
   if (!app || isFolder(app)) return null;
-  if (/[\\/]/.test(app)) return app;
+  if (/[\\/]/.test(app) || (isAndroid() && isPackage(app))) return app;
   return store.procIndex ? store.procIndex.get(app.toLowerCase()) || null : null;
 }
 
@@ -366,6 +379,45 @@ export async function importClipboard() {
   } catch (e) {
     errorToast(e);
   }
+}
+
+// ---------- QR codes (Android) ----------
+
+let scanning = false;
+export const isScanning = () => scanning;
+export const cancelScan = () => invoke('plugin:barcode-scanner|cancel').catch(() => { /* already closed */ });
+
+/**
+ * A server link or subscription address from a QR code. The camera is under the page:
+ * the page turns transparent and shows only a frame, a hint and «Отмена».
+ */
+export async function scanQr() {
+  if (scanning) return;
+  // asks only the first time; after «Запретить» Android answers by itself
+  const perm = await invoke('plugin:barcode-scanner|request_permissions').catch(() => null);
+  if (!perm || perm.camera !== 'granted') {
+    errorToast('Нет доступа к камере. Его можно включить в настройках Android: Приложения → ReTunl → Разрешения.');
+    return;
+  }
+  const cover = h('div.scan', { role: 'dialog', 'aria-label': 'Сканирование QR-кода' },
+    h('div.scan-frame'),
+    h('p.scan-text', 'Наведите камеру на QR-код со ссылкой на сервер или адресом подписки'),
+    h('button.btn.big.scan-cancel', { type: 'button', onclick: cancelScan }, 'Отмена'));
+  document.body.append(cover);
+  document.documentElement.classList.add('scanning');
+  scanning = true;
+  let text = '';
+  try {
+    const res = await invoke('plugin:barcode-scanner|scan', { windowed: true, formats: ['QR_CODE'] });
+    text = ((res && res.content) || '').trim();
+  } catch (e) {
+    if (!/cancel/i.test(errText(e))) errorToast(e);
+  } finally {
+    scanning = false;
+    cover.remove();
+    document.documentElement.classList.remove('scanning');
+  }
+  if (text) await importText(text);
 }
 
 export async function importFile() {

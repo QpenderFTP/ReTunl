@@ -99,6 +99,8 @@ const ICONS = {
   external: 'M14 4h6v6M20 4l-8.5 8.5M18 14v6H4V6h6',
   lock: 'M6 10.5h12v10H6zM8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3M12 14.5v2',
   terminal: 'M3.5 4.5h17v15h-17zM7.5 9.5l3 2.5-3 2.5M12.5 15h4',
+  phone: 'M7 2.5h10v19H7zM11 18h2',
+  qr: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2.5v2.5H14zM17.5 17.5H20V20h-2.5zM14 20h1M20 14v1',
 };
 
 export function icon(name, cls) {
@@ -202,6 +204,8 @@ export const errorToast = (e) => toast(errText(e), { kind: 'error' });
 
 // ---------- dialogs ----------
 
+const touch = matchMedia('(pointer: coarse)');
+
 /** Modal dialog. Returns {el, body, close}. */
 export function dialog({ title, body, actions = [], wide = false, onClose, lead }) {
   const d = h('dialog.dlg' + (wide ? '.wide' : ''), { 'aria-label': title });
@@ -218,7 +222,8 @@ export function dialog({ title, body, actions = [], wide = false, onClose, lead 
   d.addEventListener('mouseup', (e) => { if (downOnBackdrop && e.target === d && !wide) close(); downOnBackdrop = false; });
   document.body.append(d);
   d.showModal();
-  const focus = d.querySelector('.dlg-body input:not([type=checkbox]):not([type=radio]), .dlg-body textarea, .dlg-body select');
+  // touch screens: a focused field opens the keyboard over the dialog
+  const focus = !touch.matches && d.querySelector('.dlg-body input:not([type=checkbox]):not([type=radio]), .dlg-body textarea, .dlg-body select');
   if (focus) focus.focus();
   return { el: d, body: content, close };
 }
@@ -257,6 +262,8 @@ export function promptDialog({ title, value = '', label, ok = 'Сохранит�
 // ---------- popup menu ----------
 
 let openMenu = null;
+
+export const menuOpen = () => !!openMenu;
 
 export function closeMenu() {
   if (!openMenu) return;
