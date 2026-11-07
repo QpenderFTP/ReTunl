@@ -143,6 +143,8 @@ pub struct ImportSummary {
     /// The text is an encrypted ReTunl export: the UI asks for its password.
     #[serde(skip_serializing_if = "Option::is_none")]
     bundle: Option<String>,
+    /// AmneziaVPN full-access keys: these servers went to «Мои серверы».
+    admin: Vec<crate::admin::ServerView>,
 }
 
 fn apply_import(st: &Arc<AppState>, res: ImportResult) -> R<ImportSummary> {
@@ -164,6 +166,20 @@ fn apply_import(st: &Arc<AppState>, res: ImportResult) -> R<ImportSummary> {
 async fn import_any(st: &Arc<AppState>, text: &str) -> R<ImportSummary> {
     if bundle::looks_like(text) {
         return Ok(ImportSummary { bundle: Some(text.trim().to_string()), ..Default::default() });
+    }
+    // full-access keys carry a server login, not a connection
+    let mut admin = Vec::new();
+    let mut rest = text.to_string();
+    for token in text.split_whitespace() {
+        if let Some(a) = retunl_core::links::admin_access(token) {
+            admin.push(st.admin.add_access(a).await?);
+            rest = rest.replace(token, "");
+        }
+    }
+    if !admin.is_empty() {
+        let mut sum = if rest.trim().is_empty() { ImportSummary::default() } else { Box::pin(import_any(st, &rest)).await.unwrap_or_default() };
+        sum.admin = admin;
+        return Ok(sum);
     }
     let res = subscription::parse_text(text);
     if res.profiles.is_empty() && !res.urls.is_empty() {

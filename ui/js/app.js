@@ -8,12 +8,13 @@ import {
 } from './store.js';
 import { overview, speedProgress } from './overview.js';
 import { servers } from './servers.js';
+import { myServers, loadHosts } from './hosts.js';
 import { rules } from './rules.js';
 import { activity } from './activity.js';
 import { logs } from './logs.js';
 import { settingsPage, applyTheme } from './settings.js';
 
-const PAGES = [overview, servers, rules, activity, logs, settingsPage];
+const PAGES = [overview, servers, myServers, rules, activity, logs, settingsPage];
 const page = () => PAGES.find((p) => p.id === store.page) || overview;
 
 const PHASE_LABEL = {
@@ -168,7 +169,7 @@ function tickClock() {
 }
 
 function keyboard(e) {
-  if (e.ctrlKey && !e.altKey && !e.shiftKey && /^[1-6]$/.test(e.key) && !document.querySelector('dialog[open]')) {
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && /^[1-7]$/.test(e.key) && !document.querySelector('dialog[open]')) {
     e.preventDefault();
     navigate(PAGES[Number(e.key) - 1].id);
   }
@@ -194,6 +195,7 @@ async function init() {
   } catch { /* keep the empty catalog */ }
   store.navigate = navigate;
   renderRail();
+  loadHosts().then(updateCounts).catch(() => { /* shown when the page opens */ });
   let saved = 'overview';
   try { saved = localStorage.getItem('page') || 'overview'; } catch { /* storage off */ }
   if (!D().profiles.length) saved = 'overview';

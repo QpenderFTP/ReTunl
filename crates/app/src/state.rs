@@ -32,11 +32,14 @@ pub struct AppState {
     pub speed: Mutex<Option<SpeedResult>>,
     /// Held while a speed test runs.
     pub speed_lock: tokio::sync::Mutex<()>,
+    /// «Мои серверы»
+    pub admin: crate::admin::Admin,
 }
 
 impl AppState {
     pub fn new(paths: Paths, data: AppData, warning: Option<String>, hidden_launch: bool) -> AppState {
         let engine = Arc::new(Engine::new(Some(paths.data_dir.join("stats.json"))));
+        let admin = crate::admin::Admin::new(paths.data_dir.join("my-servers.json"));
         AppState {
             hidden_launch,
             paths,
@@ -52,6 +55,7 @@ impl AppState {
             warning: Mutex::new(warning),
             speed: Mutex::new(None),
             speed_lock: tokio::sync::Mutex::new(()),
+            admin,
         }
     }
 

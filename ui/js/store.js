@@ -306,6 +306,19 @@ export function reportImport(sum) {
   }
   const n = sum.added.length;
   const many = (k) => plural(k, 'сервер', 'сервера', 'серверов');
+  const admin = sum.admin || [];
+  if (admin.length) {
+    // AmneziaVPN full-access keys go to «Мои серверы»
+    if (store.adminImported) store.adminImported(admin);
+    const failed = admin.filter((v) => v.error);
+    toast(admin.length === 1 ? `«${admin[0].name}» добавлен в «Мои серверы»` : `В «Мои серверы» добавлено: ${many(admin.length)}`, {
+      kind: failed.length === admin.length ? 'error' : 'info',
+      detail: failed.length ? 'Не удалось зайти на сервер: ' + failed[0].error : null,
+      timeout: failed.length ? 10000 : 5000,
+      action: store.page === 'hosts' ? null : { label: 'Открыть', run: () => store.navigate('hosts') },
+    });
+    if (!n && !sum.subscriptions.length && !sum.errors.length && !sum.duplicates && !sum.warnings.length) return;
+  }
   let text;
   if (sum.subscriptions.length) text = `Подписка добавлена: ${many(sum.names.length)}`;
   else if (n) text = `Добавлено: ${many(n)}`;

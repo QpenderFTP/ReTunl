@@ -10,6 +10,7 @@ use serde_json::{json, Map, Value};
 
 use crate::util::{is_ip, split_list, LinkParts};
 
+pub use amnezia::{admin_access, AdminAccess};
 pub(crate) use other::with_prefix;
 
 #[derive(Debug, Clone, PartialEq)]

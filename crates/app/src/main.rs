@@ -1,6 +1,7 @@
 // No console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod admin;
 mod api;
 mod blocks;
 mod clash;
@@ -190,6 +191,22 @@ fn main() {
             api::open_url,
             api::app_ready,
             api::quit_app,
+            admin::commands::admin_servers,
+            admin::commands::admin_add,
+            admin::commands::admin_scan,
+            admin::commands::admin_client_add,
+            admin::commands::admin_client_remove,
+            admin::commands::admin_client_rename,
+            admin::commands::admin_client_key,
+            admin::commands::admin_install,
+            admin::commands::admin_remove_protocol,
+            admin::commands::admin_start_protocol,
+            admin::commands::admin_rename,
+            admin::commands::admin_forget,
+            admin::commands::admin_trust_key,
+            admin::commands::admin_pick_key,
+            admin::commands::admin_use_client,
+            admin::commands::admin_save_conf,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start ReTunl");

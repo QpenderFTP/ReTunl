@@ -98,6 +98,7 @@ const ICONS = {
   list: 'M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01',
   external: 'M14 4h6v6M20 4l-8.5 8.5M18 14v6H4V6h6',
   lock: 'M6 10.5h12v10H6zM8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3M12 14.5v2',
+  terminal: 'M3.5 4.5h17v15h-17zM7.5 9.5l3 2.5-3 2.5M12.5 15h4',
 };
 
 export function icon(name, cls) {

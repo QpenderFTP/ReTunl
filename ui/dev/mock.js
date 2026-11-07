@@ -178,13 +178,173 @@
     return out;
   };
 
-  const summary = (o) => ({ added: [], names: [], duplicates: 0, errors: [], warnings: [], subscriptions: [], ...o });
+  const summary = (o) => ({ added: [], names: [], duplicates: 0, errors: [], warnings: [], subscriptions: [], admin: [], ...o });
+
+  // ---------- «Мои серверы» ----------
+  const fakeQr = (seed) => {
+    const size = 45;
+    let x = seed;
+    let bits = '';
+    const finder = (a, b) => a === 0 || a === 6 || b === 0 || b === 6 || (a > 1 && a < 5 && b > 1 && b < 5);
+    for (let i = 0; i < size * size; i++) {
+      x = (x * 1103515245 + 12345) & 0x7fffffff;
+      const r = Math.floor(i / size);
+      const c = i % size;
+      const inF = (r < 7 && c < 7) || (r < 7 && c >= size - 7) || (r >= size - 7 && c < 7);
+      if (inF) bits += finder(r < 7 ? r : r - (size - 7), c < 7 ? c : c - (size - 7)) ? '1' : '0';
+      else if ((r < 8 && (c < 8 || c >= size - 8)) || (r >= size - 8 && c < 8)) bits += '0';
+      else bits += (x >> 16) & 1 ? '1' : '0';
+    }
+    return { size, bits };
+  };
+  const qtDate = (d) => d.toString().slice(0, 24).replace(/ 0(\d) /, ' $1 ');
+  const awgClient = (name, ip, hs, rx, tx, days) => ({ id: id() + 'AbC=', name, created: qtDate(new Date(Date.now() - days * 86400000)), ip, handshake: hs, rx, tx, primary: false });
+  const fullScan = () => ({
+    os: 'Ubuntu 24.04.1 LTS', arch: 'x86_64', docker: true, at: now(),
+    protocols: [
+      { container: 'amnezia-awg2', kind: 'awg', title: 'AmneziaWG', state: 'running', port: 41532, transport: 'udp', detail: null, problem: null,
+        clients: [awgClient('Ноутбук', '10.8.1.2', now() - 45, 3.1e9, 48.2e9, 40), awgClient('Телефон Маши', '10.8.1.3', now() - 3 * 3600, 210e6, 2.4e9, 12), awgClient('Телевизор', '10.8.1.4', null, 0, 0, 2)] },
+      { container: 'amnezia-xray', kind: 'xray', title: 'VLESS Reality', state: 'running', port: 443, transport: 'tcp', detail: 'маскировка под www.googletagmanager.com', problem: null,
+        clients: [{ id: '5b1e2c4a-1111-4a5b-9c3d-0f1e2d3c4b5a', name: 'Основной ключ сервера', created: null, ip: null, handshake: null, rx: 0, tx: 0, primary: true },
+          { id: '7c2d3e4f-2222-4b6c-8d4e-1a2b3c4d5e6f', name: 'Папа', created: 'Sat Oct 17 09:12:44 2026', ip: null, handshake: null, rx: 0, tx: 0, primary: false }] },
+      { container: 'amnezia-openvpn', kind: 'other', title: 'OpenVPN', state: 'exited', port: 1194, transport: 'udp', detail: null, problem: null, clients: null },
+    ],
+  });
+  let hosts = /nohosts/.test(location.hash) ? [] : [
+    { id: 'h1', name: 'Амстердам', host: '198.51.100.24', port: 22, user: 'root', auth: 'password', host_key: 'SHA256:q3Jx…', added_at: now() - 86400 * 30, scan: null, error: null },
+    { id: 'h2', name: 'Франкфурт', host: '203.0.113.80', port: 2222, user: 'admin', auth: 'key', host_key: 'SHA256:Lk2p…', added_at: now() - 86400 * 3, scan: null, error: null },
+  ];
+  const host = (hid) => {
+    const x = hosts.find((v) => v.id === hid);
+    if (!x) throw 'Сервер не найден';
+    return x;
+  };
+  const proto = (x, c) => x.scan.protocols.find((p) => p.container === c);
+  const confText = (ip) => `[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = ${ip}/32\nDNS = 1.1.1.1, 1.0.0.1\nMTU = 1376\nJc = 4\nJmin = 10\nJmax = 50\nS1 = 86\nS2 = 112\nH1 = 1820587466\nH2 = 1129431853\nH3 = 2001398341\nH4 = 862190527\n\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nPresharedKey = 7wq0h5YUMV3qNzb9dGNikGUGQ9I6uKsNptTdOeD0uYM=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 198.51.100.24:41532\nPersistentKeepalive = 25\n`;
+  const keyFor = (x, p, c, once) => (p.kind === 'xray'
+    ? { name: c.name, kind: 'xray', text: `vless://${c.id}@${x.host}:${p.port}?type=tcp&encryption=none&flow=xtls-rprx-vision&security=reality&pbk=Q5n2m0Zr7r4xYk3o8b1sXfV9gH6cJ2dLwT0aEqPuMjA&fp=chrome&sni=www.googletagmanager.com&sid=3f9a1c7e5b2d4086#${encodeURIComponent(c.name)}`, file_name: null, qr: fakeQr(c.name.length * 7919), once: false }
+    : { name: c.name, kind: p.kind, text: confText(c.ip), file_name: x.name + '-' + c.name + '.conf', qr: /длинн/i.test(c.name) ? null : fakeQr(c.name.length * 104729), once });
+  const adminHandlers = {
+    admin_servers: () => hosts,
+    admin_add: async ({ form }) => {
+      await wait(1100);
+      if (form.password === 'bad') throw 'Сервер не принял пароль для root';
+      const m = /^(?:([^@]+)@)?([^:]+)(?::(\d+))?$/.exec(form.host.trim());
+      const x = { id: id(), name: form.name || m[2], host: m[2], port: form.port || 22, user: form.user || 'root', auth: form.key_path ? 'key' : 'password', host_key: 'SHA256:new…', added_at: now(),
+        scan: { os: 'Debian GNU/Linux 12 (bookworm)', arch: 'x86_64', docker: false, at: now(), protocols: [] }, error: null };
+      hosts.push(x);
+      return x;
+    },
+    admin_scan: async ({ id: hid }) => {
+      await wait(1300);
+      const x = host(hid);
+      if (x.id === 'h2' && !x.trusted) {
+        x.error = 'Ключ SSH сервера изменился: был SHA256:Lk2pW8…, теперь SHA256:9fQv1R…. Если вы переустанавливали систему на сервере, доверьтесь новому ключу; если нет — кто-то может подменять сервер.';
+        throw x.error;
+      }
+      x.error = null;
+      if (!x.scan) x.scan = x.id === 'h1' ? fullScan() : { os: 'Debian GNU/Linux 12 (bookworm)', arch: 'aarch64', docker: true, at: now(), protocols: [] };
+      x.scan.at = now();
+      return x;
+    },
+    admin_trust_key: ({ id: hid }) => { const x = host(hid); x.trusted = true; x.error = null; },
+    admin_rename: ({ id: hid, name }) => { host(hid).name = name; },
+    admin_forget: ({ id: hid }) => { hosts = hosts.filter((x) => x.id !== hid); },
+    admin_client_add: async ({ id: hid, container, name }) => {
+      await wait(900);
+      const x = host(hid);
+      const p = proto(x, container);
+      const used = p.clients.map((c) => Number((c.ip || '0.0.0.1').split('.')[3]));
+      const c = p.kind === 'xray'
+        ? { id: crypto.randomUUID(), name, created: qtDate(new Date()), ip: null, handshake: null, rx: 0, tx: 0, primary: false }
+        : awgClient(name, '10.8.1.' + (Math.max(1, ...used) + 1), null, 0, 0, 0);
+      p.clients.push(c);
+      return { server: x, key: keyFor(x, p, c, p.kind !== 'xray') };
+    },
+    admin_client_remove: async ({ id: hid, container, client }) => {
+      await wait(700);
+      const x = host(hid);
+      const p = proto(x, container);
+      p.clients = p.clients.filter((c) => c.id !== client);
+      return x;
+    },
+    admin_client_rename: async ({ id: hid, container, client, name }) => {
+      await wait(600);
+      const x = host(hid);
+      proto(x, container).clients.find((c) => c.id === client).name = name;
+      return x;
+    },
+    admin_client_key: async ({ id: hid, container, client }) => {
+      await wait(600);
+      const x = host(hid);
+      const p = proto(x, container);
+      return keyFor(x, p, p.clients.find((c) => c.id === client), false);
+    },
+    admin_install: async ({ id: hid, kind, port, site, client }) => {
+      const x = host(hid);
+      const step = async (s, state, detail, ms) => { emit('admin-progress', { server: hid, step: s, state, detail: detail || null }); if (ms) await wait(ms); };
+      await step('connect', 'run', null, 500);
+      await step('connect', 'done');
+      await step('check', 'run', null, 700);
+      if (port === 1) throw 'Порт 1/udp на сервере уже занят:\nUNCONN 0 0 0.0.0.0:1 0.0.0.0:*\nВыберите другой порт.';
+      await step('check', 'done', x.scan.arch);
+      if (x.scan.docker) await step('docker', 'skip');
+      else {
+        for (const l of ['Reading package lists...', 'Setting up containerd (1.7.24)...', 'Setting up docker.io (26.1.5)...']) await step('docker', 'run', l, 900);
+        await step('docker', 'done');
+        x.scan.docker = true;
+      }
+      for (const l of ['Step 1/6 : FROM amneziavpn/amneziawg-go:latest', 'Step 3/6 : RUN apk add --no-cache bash dumb-init iptables', 'Successfully built 3b7f1c2a9e44']) await step('build', 'run', l, 1000);
+      if (/fail/.test(location.hash)) throw 'Не удалось собрать контейнер:\nerror pulling image configuration: toomanyrequests';
+      await step('build', 'done');
+      await step('start', 'run', null, 1200);
+      await step('start', 'done');
+      const title = { awg: 'AmneziaWG', xray: 'VLESS Reality', wireguard: 'WireGuard' }[kind];
+      const container = { awg: 'amnezia-awg2', xray: 'amnezia-xray', wireguard: 'amnezia-wireguard' }[kind];
+      const p = { container, kind, title, state: 'running', port, transport: kind === 'xray' ? 'tcp' : 'udp', detail: kind === 'xray' ? 'маскировка под ' + site : null, problem: null, clients: [] };
+      if (kind === 'xray') p.clients.push({ id: crypto.randomUUID(), name: 'Основной ключ сервера', created: null, ip: null, handshake: null, rx: 0, tx: 0, primary: true });
+      x.scan.protocols.push(p);
+      let key = null;
+      if (client) {
+        await step('client', 'run', null, 700);
+        const r = await adminHandlers.admin_client_add({ id: hid, container, name: client });
+        key = r.key;
+        await step('client', 'done');
+      }
+      return { server: x, key };
+    },
+    admin_remove_protocol: async ({ id: hid, container }) => {
+      await wait(1200);
+      const x = host(hid);
+      x.scan.protocols = x.scan.protocols.filter((p) => p.container !== container);
+      return x;
+    },
+    admin_start_protocol: async ({ id: hid, container }) => {
+      await wait(1000);
+      const x = host(hid);
+      proto(x, container).state = 'running';
+      return x;
+    },
+    admin_pick_key: () => 'C:\\Users\\me\\.ssh\\id_ed25519',
+    admin_use_client: ({ text, name }) => {
+      const p = { id: id(), name, outbound: /^vless:/.test(text) ? { type: 'vless', server: '198.51.100.24', server_port: 443 } : { type: 'wireguard', address: ['10.8.1.5/32'], peers: [{ address: '198.51.100.24', port: 41532 }] } };
+      data.profiles.push(p);
+      return p.id;
+    },
+    admin_save_conf: ({ name }) => 'C:\\Users\\me\\Documents\\' + name,
+  };
 
   const handlers = {
-    get_state: () => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.1.0', data_dir: MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
+    ...adminHandlers,
+    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.1.0', data_dir: MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });
+      if (text.trim().startsWith('vpn://full')) {
+        const x = { id: id(), name: 'Сервер из AmneziaVPN', host: '192.0.2.15', port: 22, user: 'root', auth: 'password', host_key: 'SHA256:amn…', added_at: now(), scan: fullScan(), error: null };
+        hosts.push(x);
+        return summary({ admin: [x] });
+      }
       if (/^https?:\/\//.test(text.trim())) {
         const sid = id();
         data.subscriptions.push({ id: sid, name: new URL(text.trim()).host, url: text.trim(), updated_at: now(), info: null, last_error: null });

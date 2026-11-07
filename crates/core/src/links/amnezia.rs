@@ -18,6 +18,32 @@ pub fn parse(link: &str) -> LinkResult {
     from_json(&v)
 }
 
+/// SSH access to a server, from an AmneziaVPN full-access key
+/// («Поделиться → Полный доступ»): the server's login and its protocols.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdminAccess {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    /// A password, or a private key when it starts with `-----BEGIN`.
+    pub secret: String,
+}
+
+/// The access a `vpn://` key gives, if it is a full-access key.
+pub fn admin_access(link: &str) -> Option<AdminAccess> {
+    let body = link.trim().strip_prefix("vpn://")?.trim();
+    let json = decode_payload(&b64_decode(body)?)?;
+    let v: Value = serde_json::from_slice(&json).ok()?;
+    let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let host = text("hostName")?;
+    let user = text("userName")?;
+    let secret = v.get("password").and_then(Value::as_str).filter(|s| !s.is_empty())?.to_string();
+    let port = v.get("port").and_then(Value::as_u64).filter(|p| (1..=65535).contains(p)).unwrap_or(22) as u16;
+    let name = text("description").unwrap_or_else(|| host.clone());
+    Some(AdminAccess { name, host, port, user, secret })
+}
+
 fn decode_payload(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.first() == Some(&b'{') {
         return Some(raw.to_vec());
@@ -105,6 +131,27 @@ mod tests {
         assert_eq!(p.outbound["type"], "wireguard");
         assert_eq!(p.outbound["header_protection_key"], "KIKOZNzj+d+G5Gw84nfLm49oM/f+xMoThA4AEOqyZkc=");
         assert_eq!(p.outbound["peers"][0]["port"], 39000);
+    }
+
+    #[test]
+    fn full_access_key() {
+        let v = json!({
+            "containers": [{"container": "amnezia-awg2", "awg": {"port": "39000"}}],
+            "defaultContainer": "amnezia-awg2",
+            "description": "VPS",
+            "hostName": "203.0.113.7",
+            "userName": "root",
+            "password": "s3cret",
+            "port": 2222,
+        });
+        let a = admin_access(&key(&v)).unwrap();
+        assert_eq!(a, AdminAccess { name: "VPS".into(), host: "203.0.113.7".into(), port: 2222, user: "root".into(), secret: "s3cret".into() });
+        // a connection key has no login
+        let mut plain = v.clone();
+        plain["userName"] = json!("");
+        plain["password"] = json!("");
+        assert!(admin_access(&key(&plain)).is_none());
+        assert!(admin_access("vless://x").is_none());
     }
 
     #[test]
