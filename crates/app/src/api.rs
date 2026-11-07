@@ -17,8 +17,10 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::blocks::BlockStats;
 use crate::engine::{LogLine, Poll, Status, NEED_ADMIN};
 use crate::probe::{self, Latency};
+use crate::speed::{self, SpeedResult};
 use crate::state::{add_profiles, forget_profiles, merge_subscription, AppState};
 use crate::sys::{self, Adapter, Autostart, ProcInfo};
 use crate::{fetch, icons};
@@ -68,6 +70,9 @@ pub struct View {
     warning: Option<String>,
     /// "windows" or "macos": the UI words things for the system
     platform: &'static str,
+    blocks: BlockStats,
+    /// The last speed test.
+    speed: Option<SpeedResult>,
 }
 
 #[tauri::command]
@@ -92,6 +97,8 @@ pub fn get_state(st: St<'_>) -> View {
         portable: st.paths.portable,
         warning: st.warning.lock().unwrap_or_else(|e| e.into_inner()).take(),
         platform: std::env::consts::OS,
+        blocks: st.engine.blocks.stats(),
+        speed: st.speed.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     }
 }
 
@@ -453,6 +460,24 @@ pub async fn test_latency(st: St<'_>, ids: Option<Vec<String>>) -> R<HashMap<Str
     let results = probe::measure(&st.paths, &data.settings, profiles, st.engine.job()).await?;
     st.latency.lock().unwrap_or_else(|e| e.into_inner()).extend(results.clone());
     Ok(results)
+}
+
+/// Download speed and ping without the VPN and through the selected server.
+/// Progress comes as `speed-progress` events.
+#[tauri::command]
+pub async fn speed_test(app: AppHandle, st: St<'_>) -> R<SpeedResult> {
+    let Ok(_running) = st.speed_lock.try_lock() else {
+        return Err("Проверка скорости уже идёт.".into());
+    };
+    let data = st.snapshot();
+    let profile = data.active_profile().cloned();
+    let h = app.clone();
+    let r = speed::run(&st.paths, &data.settings, profile, st.engine.job(), move |p| {
+        let _ = h.emit("speed-progress", &p);
+    })
+    .await?;
+    *st.speed.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.clone());
+    Ok(r)
 }
 
 // ---------- rules ----------

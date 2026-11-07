@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod blocks;
 mod clash;
 mod engine;
 mod fetch;
@@ -9,6 +10,7 @@ mod fetch;
 mod icons;
 mod paths;
 mod probe;
+mod speed;
 mod state;
 mod store;
 // Windows in sys.rs, macOS in sys_mac.rs: the same functions
@@ -154,6 +156,7 @@ fn main() {
             api::add_interface,
             api::list_adapters,
             api::test_latency,
+            api::speed_test,
             api::save_rule,
             api::delete_rule,
             api::set_rule_enabled,

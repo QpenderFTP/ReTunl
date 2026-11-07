@@ -9,6 +9,8 @@ export const store = {
   catalog: { presets: [], rule_sets: [], dns: [] },
   traffic: null,
   conns: null,
+  blocks: null, // blocked requests: session, total, top
+  speedRun: null, // the speed test in progress
   coreProgress: null,
   startupWarning: null,
   icons: new Map(), // exe path -> data URL | null
@@ -30,6 +32,7 @@ export async function refresh() {
   const v = await invoke('get_state');
   if (v.warning) store.startupWarning = v.warning;
   store.view = v;
+  if (v.blocks) store.blocks = v.blocks;
   emit('data');
 }
 

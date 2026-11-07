@@ -11,6 +11,7 @@ use tauri::AppHandle;
 use crate::engine::{Engine, StartRequest};
 use crate::paths::Paths;
 use crate::probe::Latency;
+use crate::speed::SpeedResult;
 use crate::tray::Tray;
 use crate::{fetch, store};
 
@@ -28,15 +29,19 @@ pub struct AppState {
     pub warning: Mutex<Option<String>>,
     /// Started by autostart / minimized: keep the window in the tray.
     pub hidden_launch: bool,
+    pub speed: Mutex<Option<SpeedResult>>,
+    /// Held while a speed test runs.
+    pub speed_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
     pub fn new(paths: Paths, data: AppData, warning: Option<String>, hidden_launch: bool) -> AppState {
+        let engine = Arc::new(Engine::new(Some(paths.data_dir.join("stats.json"))));
         AppState {
             hidden_launch,
             paths,
             data: Mutex::new(data),
-            engine: Arc::new(Engine::new()),
+            engine,
             http: fetch::http_client(),
             elevated: crate::sys::is_elevated(),
             latency: Mutex::new(HashMap::new()),
@@ -45,6 +50,8 @@ impl AppState {
             handle: OnceLock::new(),
             tray: Mutex::new(None),
             warning: Mutex::new(warning),
+            speed: Mutex::new(None),
+            speed_lock: tokio::sync::Mutex::new(()),
         }
     }
 

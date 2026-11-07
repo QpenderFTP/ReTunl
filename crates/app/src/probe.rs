@@ -3,7 +3,8 @@
 //! protocols too and never touches system networking.
 
 use std::collections::HashMap;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use retunl_core::awg::{pick_core, CoreKind, CoreNeed, CorePref};
@@ -11,6 +12,7 @@ use retunl_core::singbox::build_probe;
 use retunl_core::util::now_unix;
 use retunl_core::{Profile, Settings};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::clash::Clash;
 use crate::paths::Paths;
@@ -25,13 +27,22 @@ pub struct Latency {
 
 const PARALLEL: usize = 8;
 
-pub async fn measure(
-    paths: &Paths,
-    settings: &Settings,
-    profiles: Vec<Profile>,
-    job: Option<&sys::Job>,
-) -> Result<HashMap<String, Latency>, String> {
-    // sing-box-lx runs everything the official core does, plus AmneziaWG and XHTTP
+/// A sing-box started for a test; it is stopped when this is dropped.
+pub struct ProbeCore {
+    child: Child,
+    pub clash: Clash,
+}
+
+impl Drop for ProbeCore {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The core for a test of `profiles`: sing-box-lx runs everything the
+/// official core does, plus AmneziaWG and XHTTP.
+pub fn pick(paths: &Paths, settings: &Settings, profiles: &[Profile]) -> Result<(CoreKind, PathBuf), String> {
     let lx_ok = paths.find_lx_core().is_some();
     let need = profiles.iter().map(Profile::core_need).max().unwrap_or(CoreNeed::Any);
     let mut kind = pick_core(settings.core, need, lx_ok).unwrap_or(
@@ -41,27 +52,39 @@ pub async fn measure(
         kind = CoreKind::Extended;
     }
     let core = paths.core_for(kind).ok_or("Не найдено ядро sing-box.")?;
-    let mut results = HashMap::new();
-    let (profiles, skipped): (Vec<Profile>, Vec<Profile>) = profiles
-        .into_iter()
-        .partition(|p| kind == CoreKind::Extended || p.core_need() != CoreNeed::Extended);
-    for p in skipped {
-        let error = if lx_ok { "Включите ядро sing-box-lx в настройках" } else { "Нужно ядро sing-box-lx" };
-        results.insert(p.id, Latency { ms: None, error: Some(error.into()), at: now_unix() });
+    Ok((kind, core))
+}
+
+/// Why a server can't be tested on `kind`, if it can't.
+pub fn unsupported(paths: &Paths, kind: CoreKind, p: &Profile) -> Option<&'static str> {
+    if kind == CoreKind::Extended || p.core_need() != CoreNeed::Extended {
+        return None;
     }
-    if profiles.is_empty() {
-        return Ok(results);
-    }
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
+    Some(if paths.find_lx_core().is_some() { "Включите ядро sing-box-lx в настройках" } else { "Нужно ядро sing-box-lx" })
+}
+
+/// A free port on 127.0.0.1.
+pub fn free_port() -> Result<u16, String> {
+    std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
-        .map_err(|e| e.to_string())?;
-    let secret = uuid::Uuid::new_v4().simple().to_string();
-    let refs: Vec<&Profile> = profiles.iter().collect();
-    let cfg = build_probe(&refs, settings, port, &secret, kind).map_err(|e| e.0)?;
-    let file = paths.run_dir().join("probe.json");
-    std::fs::write(&file, serde_json::to_vec_pretty(&cfg).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let mut child = sys::quiet(&core)
+        .map_err(|e| e.to_string())
+}
+
+/// Write `cfg` as `file_name` in the run folder, start sing-box with it and
+/// wait until its control API on `port` answers.
+pub async fn launch(
+    paths: &Paths,
+    core: &Path,
+    cfg: &Value,
+    file_name: &str,
+    port: u16,
+    secret: &str,
+    job: Option<&sys::Job>,
+) -> Result<ProbeCore, String> {
+    let file = paths.run_dir().join(file_name);
+    std::fs::write(&file, serde_json::to_vec_pretty(cfg).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let child = sys::quiet(core)
         .args(["run", "--disable-color", "-c"])
         .arg(&file)
         .arg("-D")
@@ -75,34 +98,60 @@ pub async fn measure(
     if let Some(job) = job {
         job.assign(&child);
     }
-    let clash = Clash::new(port, &secret);
+    let mut probe = ProbeCore { child, clash: Clash::new(port, secret) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(Some(_)) = child.try_wait() {
+        if let Ok(Some(_)) = probe.child.try_wait() {
             let mut err = String::new();
-            if let Some(mut e) = child.stderr.take() {
+            if let Some(mut e) = probe.child.stderr.take() {
                 use std::io::Read;
                 let _ = e.read_to_string(&mut err);
             }
             let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("неизвестная ошибка");
             return Err(format!("Проверка не запустилась: {}", crate::engine::humanize(line)));
         }
-        if clash.alive().await {
-            break;
+        if probe.clash.alive().await {
+            return Ok(probe);
         }
         if Instant::now() > deadline {
-            let _ = child.kill();
             return Err("Проверка не запустилась: sing-box не ответил.".into());
         }
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
+}
+
+pub async fn measure(
+    paths: &Paths,
+    settings: &Settings,
+    profiles: Vec<Profile>,
+    job: Option<&sys::Job>,
+) -> Result<HashMap<String, Latency>, String> {
+    let (kind, core) = pick(paths, settings, &profiles)?;
+    let mut results = HashMap::new();
+    let mut runnable = Vec::new();
+    for p in profiles {
+        match unsupported(paths, kind, &p) {
+            Some(error) => {
+                results.insert(p.id, Latency { ms: None, error: Some(error.into()), at: now_unix() });
+            }
+            None => runnable.push(p),
+        }
+    }
+    if runnable.is_empty() {
+        return Ok(results);
+    }
+    let port = free_port()?;
+    let secret = uuid::Uuid::new_v4().simple().to_string();
+    let refs: Vec<&Profile> = runnable.iter().collect();
+    let cfg = build_probe(&refs, settings, port, &secret, kind).map_err(|e| e.0)?;
+    let probe = launch(paths, &core, &cfg, "probe.json", port, &secret, job).await?;
 
     let url = settings.test_url.clone();
-    for chunk in profiles.chunks(PARALLEL) {
+    for chunk in runnable.chunks(PARALLEL) {
         let tasks: Vec<_> = chunk
             .iter()
             .map(|p| {
-                let (clash, id, url) = (clash.clone(), p.id.clone(), url.clone());
+                let (clash, id, url) = (probe.clash.clone(), p.id.clone(), url.clone());
                 tokio::spawn(async move {
                     let r = clash.delay(&id, &url, 6000).await;
                     (id, r)
@@ -120,7 +169,6 @@ pub async fn measure(
             }
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(probe);
     Ok(results)
 }

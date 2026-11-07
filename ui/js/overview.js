@@ -1,7 +1,7 @@
 // Обзор: the connect switch and the fork — where each kind of traffic goes.
 
 import {
-  h, s, add, icon, seg, invoke, fmtRate, fmtBytes, fmtClock, now, plural, banner,
+  h, s, add, icon, seg, invoke, fmtRate, fmtBytes, fmtClock, fmtAgo, now, plural, banner, errorToast,
 } from './lib.js';
 import {
   store, D, S, ST, act, isOn, activeProfile, profile, toggleConnection, profileOptions, routePicker,
@@ -31,10 +31,17 @@ export const overview = {
   render(root) {
     refs = {};
     const st = ST();
-    add(root, [head(st), banners(st), controls(st), forkPanel(st), readouts(st)]);
+    add(root, [head(st), banners(st),
+      h('div.ov-grid',
+        h('div.ov-main', controls(st), forkPanel(st), readouts(st)),
+        h('aside.ov-side', { 'aria-label': 'Проверки' }, speedCard(), blocksCard(st)))]);
     this.onTraffic();
   },
+  onSpeed() {
+    if (refs.speed && refs.speed.isConnected) refs.speed.replaceWith(speedCard());
+  },
   onTraffic() {
+    paintBlocks();
     const t = store.traffic;
     if (refs.up && t) {
       refs.up.textContent = fmtRate(t.up);
@@ -268,4 +275,178 @@ function readouts(st) {
     ro('Загрузка', refs.down, 'down'),
     ro('Отправлено за сеанс', refs.sent),
     ro('Получено за сеанс', refs.got));
+}
+
+// ---------- speed test ----------
+
+const STEP_TEXT = { pick: 'Ищу тестовый сервер…', ping: 'Измеряю пинг…', download: 'Скачиваю…' };
+const DOWNLOAD_SECS = 8;
+
+function fmtMbps(v) {
+  if (v == null) return '—';
+  return v.toLocaleString('ru-RU', { maximumFractionDigits: v < 10 ? 1 : 0 });
+}
+
+/** A round road sign with the speed in it; the ring fills while measuring. */
+function speedSign(route, value, fill, label) {
+  const R = 44;
+  const C = 2 * Math.PI * R;
+  const text = fmtMbps(value);
+  const ring = s('svg', { class: 'sign-ring', viewBox: '0 0 100 100', 'aria-hidden': 'true' },
+    s('circle', { cx: 50, cy: 50, r: R, class: 'ring-bg' }),
+    s('circle', {
+      cx: 50, cy: 50, r: R, class: 'ring-fg', transform: 'rotate(-90 50 50)',
+      'stroke-dasharray': C.toFixed(1), 'stroke-dashoffset': (C * (1 - fill)).toFixed(1),
+    }));
+  return h('div.sign.r-' + route + (value == null ? '.empty' : ''), { role: 'img', 'aria-label': label },
+    ring,
+    h('div.sign-face',
+      h('span.sign-num' + (text.replace(/\s/g, '').length > 3 ? '.long' : ''), text),
+      h('span.sign-unit', 'Мбит/с')));
+}
+
+function speedColumn(stage, part, run) {
+  const ap = activeProfile();
+  const vpn = stage === 'vpn';
+  const route = vpn ? 'tunnel' : 'direct';
+  const title = vpn ? 'Через VPN' : 'Без VPN';
+  const live = run && run.stage === stage;
+  let value = part ? part.mbps : null;
+  let fill = value != null ? 1 : 0;
+  let lines;
+  if (live) {
+    value = run.step === 'download' ? run.mbps : null;
+    fill = run.step === 'download' ? Math.min(1, (Date.now() - run.t0) / (DOWNLOAD_SECS * 1000)) : 0;
+    lines = [h('span.speed-step', STEP_TEXT[run.step] || 'Готовлюсь…'), run.server && h('span', run.server)];
+  } else if (run && vpn) {
+    lines = [h('span', ap ? 'Следующий замер' : 'Сервер не выбран')];
+  } else if (vpn && !ap && !(part && part.error)) {
+    lines = [h('span', 'Сервер не выбран')];
+  } else if (part && part.error) {
+    lines = [h('span.speed-error', part.error)];
+  } else if (part) {
+    lines = [part.ping_ms != null && h('span', `Пинг ${part.ping_ms} мс`), part.server && h('span', { title: 'Тестовый сервер' }, part.server)];
+  } else {
+    lines = [h('span', vpn ? 'Через выбранный сервер' : 'Напрямую, мимо туннеля')];
+  }
+  const sub = vpn && ap ? ap.name : null;
+  return h('div.speed-col' + (live ? '.live' : ''),
+    speedSign(route, value, fill, `${title}: ${value == null ? 'нет данных' : fmtMbps(value) + ' Мбит/с'}`),
+    h('div.speed-name.r-' + route, title),
+    sub && h('div.speed-server', { title: sub }, sub),
+    h('div.speed-meta', lines));
+}
+
+function speedVerdict(r) {
+  const d = r.direct && r.direct.mbps;
+  const v = r.vpn && r.vpn.mbps;
+  if (!d || !v) return null;
+  const pct = Math.round((v / d) * 100);
+  if (pct >= 105) return `Через VPN быстрее на ${pct - 100}%.`;
+  if (pct >= 95) return 'Через VPN скорость почти такая же.';
+  return `Через VPN — ${pct}% от скорости без VPN.`;
+}
+
+function speedCard() {
+  const run = store.speedRun;
+  const r = store.view.speed;
+  const btn = h('button.btn.small', { disabled: !!run, onclick: runSpeedTest },
+    icon('speed'), run ? 'Проверяю…' : r ? 'Проверить снова' : 'Проверить');
+  let foot;
+  if (run) foot = 'Около 25 секунд. На каждый замер скачивается до 200 МБ.';
+  else if (r) foot = [speedVerdict(r), `Проверено ${fmtAgo(r.at)}.`].filter(Boolean).join(' ');
+  else foot = 'Сравнит скорость загрузки и пинг без VPN и через выбранный сервер.';
+  const directPart = run ? run.direct : r && r.direct;
+  const vpnPart = run ? null : r && r.vpn;
+  const el = h('section.panel.card.speed-card', { 'aria-busy': run ? 'true' : 'false' },
+    h('div.card-head', h('h2.card-title', 'Скорость'), btn),
+    h('div.speed-cols', speedColumn('direct', directPart, run), speedColumn('vpn', vpnPart, run)),
+    h('p.card-foot', foot));
+  refs.speed = el;
+  return el;
+}
+
+let ticker = null;
+async function runSpeedTest() {
+  if (store.speedRun) return;
+  store.speedRun = { stage: 'direct', step: 'pick', mbps: null, server: null, t0: Date.now(), direct: null };
+  overview.onSpeed();
+  // the ring keeps moving between progress events
+  ticker = setInterval(() => overview.onSpeed(), 250);
+  try {
+    store.view.speed = await invoke('speed_test');
+  } catch (e) {
+    errorToast(e);
+  } finally {
+    clearInterval(ticker);
+    store.speedRun = null;
+    overview.onSpeed();
+  }
+}
+
+/** A `speed-progress` event from the backend. */
+export function speedProgress(p) {
+  const run = store.speedRun;
+  if (!run) return;
+  if (p.stage === 'vpn' && run.stage === 'direct') {
+    run.direct = { mbps: run.mbps, server: run.server, ping_ms: null };
+  }
+  if (p.step === 'download' && (run.step !== 'download' || run.stage !== p.stage)) run.t0 = Date.now();
+  Object.assign(run, { stage: p.stage, step: p.step, mbps: p.mbps, server: p.server });
+}
+
+// ---------- blocked ----------
+
+function blockSign() {
+  return s('svg', { class: 'no-entry', viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+    s('circle', { cx: 12, cy: 12, r: 11 }),
+    s('rect', { x: 5, y: 10, width: 14, height: 4, rx: 1 }));
+}
+
+const hasBlockRule = () => S().final_route.kind === 'block' || D().rules.some((r) => r.enabled && r.route.kind === 'block');
+
+function blocksCard(st) {
+  const running = st.phase === 'running';
+  const b = store.blocks || { session: 0, total: 0, top: [], counting: false };
+  refs.blkSession = h('span.blk-val', b.session.toLocaleString('ru-RU'));
+  refs.blkTotal = h('span.blk-val', b.total.toLocaleString('ru-RU'));
+  refs.blkTop = h('div.blk-top');
+  const nums = h('div.blk-nums',
+    h('div.blk-num', refs.blkSession, h('span.blk-label', running ? 'за этот сеанс' : 'за последний сеанс')),
+    h('div.blk-num', refs.blkTotal, h('span.blk-label', 'за всё время')));
+  let foot = null;
+  if (!hasBlockRule()) {
+    foot = h('div.blk-off',
+      h('p.card-foot', 'Реклама и трекеры сейчас не блокируются.'),
+      h('button.btn.small', { onclick: addAdsRule }, 'Блокировать рекламу'));
+  } else if (!running) {
+    foot = h('p.card-foot', 'Считаются запросы, закрытые правилами «Блокировать», пока ReTunl подключён.');
+  }
+  const el = h('section.panel.card.blocks-card',
+    h('div.card-head', h('h2.card-title', blockSign(), 'Заблокировано')),
+    nums, refs.blkTop, foot);
+  queueMicrotask(paintBlocks);
+  return el;
+}
+
+function paintBlocks() {
+  const b = store.blocks;
+  if (!b || !refs.blkSession || !refs.blkSession.isConnected) return;
+  refs.blkSession.textContent = b.session.toLocaleString('ru-RU');
+  refs.blkTotal.textContent = b.total.toLocaleString('ru-RU');
+  const top = (b.top || []).filter(([, n]) => n > 0);
+  if (!top.length) { refs.blkTop.replaceChildren(); return; }
+  const max = top[0][1];
+  refs.blkTop.replaceChildren(
+    h('div.blk-top-title', 'Чаще всего'),
+    h('ol.blk-list', top.map(([host, n]) => h('li.blk-row', { style: { '--w': `${Math.max(4, (n / max) * 100)}%` } },
+      h('span.blk-host', { title: host }, host),
+      h('span.blk-count', n.toLocaleString('ru-RU'))))));
+}
+
+async function addAdsRule(e) {
+  e.currentTarget.disabled = true;
+  // an «Реклама и трекеры» rule that was switched off is switched back on
+  const old = D().rules.find((r) => r.preset === 'ads');
+  await act(() => (old ? invoke('set_rule_enabled', { id: old.id, enabled: true }) : invoke('add_preset', { id: 'ads' })));
 }

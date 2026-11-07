@@ -307,7 +307,7 @@ impl Default for TunSettings {
             interface_name: "ReTunl".into(),
             stack: "mixed".into(),
             mtu: 9000,
-            strict_route: true,
+            strict_route: false,
         }
     }
 }

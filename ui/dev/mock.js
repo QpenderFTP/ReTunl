@@ -44,7 +44,7 @@
     settings: {
       mode: 'tun', final_route: { kind: 'proxy' }, active_profile: 'p1', bypass_lan: true, ipv6: false, sniff: true,
       dns: { direct: '77.88.8.8', remote: 'https://1.1.1.1/dns-query', policy: 'auto' },
-      tun: { interface_name: 'ReTunl', stack: 'mixed', mtu: 9000, strict_route: true },
+      tun: { interface_name: 'ReTunl', stack: 'mixed', mtu: 9000, strict_route: false },
       mixed_port: 2080, controller_port: 19190, direct_interface: null, log_level: 'info',
       test_url: 'https://www.gstatic.com/generate_204', connect_on_launch: false, close_to_tray: true, start_minimized: true, core: 'auto',
     },
@@ -72,6 +72,11 @@
   let logs = [];
   let seq = 0;
   let totals = { up: 0, down: 0 };
+  // blocked requests; #noblocks = nothing blocked yet
+  const AD_HOSTS = ['mc.yandex.ru', 'an.yandex.ru', 'googleads.g.doubleclick.net', 'www.google-analytics.com', 'ads.vk.com', 'top-fwz1.mail.ru', 'pagead2.googlesyndication.com'];
+  const blocks = /noblocks/.test(location.hash) ? { session: 0, total: 0, top: [], counting: false } : { session: 214, total: 48213, top: [['mc.yandex.ru', 61], ['googleads.g.doubleclick.net', 44], ['top-fwz1.mail.ru', 30], ['www.google-analytics.com', 22], ['ads.vk.com', 9]], counting: false };
+  const blockTop = new Map(blocks.top);
+  let speed = /speed/.test(location.hash) ? { direct: { mbps: 187.4, ping_ms: 24, server: 'Selectel, Россия', error: null }, vpn: { mbps: 142.9, ping_ms: 61, server: 'Cloudflare', error: null }, profile: 'Нидерланды Reality', at: now() - 300 } : null;
   let conns = [];
 
   const log = (level, text, source = 'core') => {
@@ -176,7 +181,7 @@
   const summary = (o) => ({ added: [], names: [], duplicates: 0, errors: [], warnings: [], subscriptions: [], ...o });
 
   const handlers = {
-    get_state: () => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.1.0', data_dir: MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: MAC ? 'macos' : 'windows' }),
+    get_state: () => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.1.0', data_dir: MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });
@@ -294,6 +299,7 @@
         throw status.error;
       }
       conns = Array.from({ length: 18 }, (_, i) => makeConn(i));
+      Object.assign(blocks, { session: 0, top: [], counting: true }); blockTop.clear();
       setStatus({ phase: 'running', since: now(), mode: data.settings.mode, profile: ap ? ap.name : null, step: null, warnings: [], core: ap && needs()[ap.id] && lxCore && data.settings.core !== 'official' ? 'extended' : 'official' });
     },
     disconnect: async () => {
@@ -312,7 +318,13 @@
       if (Math.random() < 0.5) conns.push(makeConn(Math.floor(Math.random() * 100)));
       conns.forEach((c) => { c.up += Math.floor(Math.random() * 3000); c.down += Math.floor(Math.random() * 60000); });
       if (Math.random() < 0.3) log(Math.random() < 0.1 ? 'error' : 'info', `[${Math.floor(Math.random() * 1e9)} ${Math.floor(Math.random() * 300)}ms] outbound/vless[Нидерланды Reality]: outbound connection to ${HOSTS[Math.floor(Math.random() * HOSTS.length)][1]}:443`);
-      return { status, traffic: { up, down, up_total: totals.up, down_total: totals.down, connections: conns.length }, connections: connections ? clone(conns) : null };
+      if (Math.random() < 0.6) {
+        const host = AD_HOSTS[Math.floor(Math.random() * AD_HOSTS.length)];
+        blockTop.set(host, (blockTop.get(host) || 0) + 1);
+        blocks.session += 1; blocks.total += 1;
+        blocks.top = [...blockTop].sort((a, b) => b[1] - a[1]).slice(0, 5);
+      }
+      return { status, traffic: { up, down, up_total: totals.up, down_total: totals.down, connections: conns.length }, connections: connections ? clone(conns) : null, blocks: clone(blocks) };
     },
     close_connection: ({ id: cid }) => { conns = conns.filter((c) => c.id !== cid); },
     close_all_connections: () => { conns = []; },
@@ -336,6 +348,20 @@
       return core;
     },
     update_rule_sets: async () => { await wait(800); return 6; },
+    speed_test: async () => {
+      const ap = data.profiles.find((p) => p.id === data.settings.active_profile);
+      const part = async (stage, top, server, ping) => {
+        emit('speed-progress', { stage, step: 'pick', mbps: null, server: null }); await wait(900);
+        emit('speed-progress', { stage, step: 'ping', mbps: null, server }); await wait(500);
+        let v = 0;
+        for (let i = 0; i < 16; i++) { v = top * (0.55 + 0.45 * Math.min(1, i / 5)) * (0.95 + Math.random() * 0.1); emit('speed-progress', { stage, step: 'download', mbps: Math.round(v * 10) / 10, server }); await wait(250); }
+        return { mbps: Math.round(v * 10) / 10, ping_ms: ping, server, error: null };
+      };
+      const direct = await part('direct', 190, 'Selectel, Россия', 23);
+      const vpn = ap ? await part('vpn', 120, 'Cloudflare', 58) : null;
+      speed = { direct, vpn, profile: ap ? ap.name : null, at: now() };
+      return speed;
+    },
     open_data_dir: () => {},
     open_url: () => {},
     app_ready: () => {},

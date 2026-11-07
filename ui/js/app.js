@@ -6,7 +6,7 @@ import {
 import {
   store, on, emit, refresh, ST, D, activeProfile, toggleConnection, adminDialog, isOn,
 } from './store.js';
-import { overview } from './overview.js';
+import { overview, speedProgress } from './overview.js';
 import { servers } from './servers.js';
 import { rules } from './rules.js';
 import { activity } from './activity.js';
@@ -146,6 +146,7 @@ async function poll() {
     const res = await invoke('poll', { connections: wantConns });
     const before = ST();
     store.traffic = res.traffic;
+    if (res.blocks) store.blocks = res.blocks;
     store.conns = wantConns ? res.connections || [] : null;
     if (res.status.phase !== before.phase || res.status.since !== before.since) {
       store.view.status = res.status;
@@ -208,6 +209,7 @@ async function init() {
     if (st.phase === 'running') poll();
   });
   listen('need-admin', () => adminDialog());
+  listen('speed-progress', (p) => { speedProgress(p); if (store.page === 'overview') overview.onSpeed(); });
   listen('core-progress', (p) => { store.coreProgress = p; emit('core'); });
   listen('subscriptions-updating', (id) => { store.subUpdating.add(id); emit('data'); });
   listen('data-changed', () => { store.subUpdating.clear(); refresh(); });

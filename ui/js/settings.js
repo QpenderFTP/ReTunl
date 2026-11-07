@@ -139,7 +139,7 @@ export const settingsPage = {
     ]));
 
     root.append(section('Виртуальный адаптер', [
-      setRow('Строгая маршрутизация', 'Не даёт программам обходить адаптер и защищает от утечек DNS. Если перестал работать какой-то локальный сервис — попробуйте выключить.', toggle(set.tun.strict_route, (on) => patch({ tun: { strict_route: on } }), { id: 'set-strict' }), 'set-strict'),
+      setRow('Строгая маршрутизация', 'Не даёт программам обходить адаптер и защищает от утечек DNS. Если с ней не открываются сайты, которые идут напрямую, или перестал работать локальный сервис — выключите.', toggle(set.tun.strict_route, (on) => patch({ tun: { strict_route: on } }), { id: 'set-strict' }), 'set-strict'),
       setRow('Сетевой стек', 'Смешанный подходит почти всем. gVisor надёжнее с некоторыми антивирусами, системный быстрее.',
         (() => {
           const sel = h('select.select', { id: 'set-stack' },

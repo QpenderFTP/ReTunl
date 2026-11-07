@@ -1,10 +1,10 @@
 //! The sing-box process: start, watch, stop, logs and live statistics.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use retunl_core::{AppData, InboundMode, Route};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::blocks::{BlockStats, Blocks};
 use crate::clash::Clash;
 use crate::fetch;
 use crate::paths::Paths;
@@ -23,6 +24,8 @@ use crate::sys;
 /// Error text meaning "TUN needs admin rights" — the UI offers a restart.
 pub const NEED_ADMIN: &str = "need_admin";
 const LOG_CAPACITY: usize = 4000;
+/// The macOS core log file is emptied once it grows past this.
+const LOG_FILE_LIMIT: u64 = 8 << 20;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +100,7 @@ pub struct Poll {
     pub status: Status,
     pub traffic: Option<Traffic>,
     pub connections: Option<Vec<Conn>>,
+    pub blocks: BlockStats,
 }
 
 pub struct StartRequest {
@@ -130,6 +134,9 @@ type Listener = Box<dyn Fn(Status) + Send + Sync>;
 struct LogTail {
     file: std::fs::File,
     partial: Vec<u8>,
+    read: u64,
+    /// We created the file, so we may empty it (sing-box appends).
+    writable: bool,
 }
 
 pub struct Engine {
@@ -140,10 +147,14 @@ pub struct Engine {
     job: Option<sys::Job>,
     listener: OnceLock<Listener>,
     next_id: AtomicU64,
+    pub blocks: Blocks,
+    /// Core lines less important than this are not shown (see [`level_rank`]).
+    view_level: AtomicU8,
 }
 
 impl Engine {
-    pub fn new() -> Engine {
+    /// `stats` keeps the all-time count of blocked requests.
+    pub fn new(stats: Option<PathBuf>) -> Engine {
         Engine {
             inner: Mutex::new(Inner {
                 status: Status::new(Phase::Stopped),
@@ -159,6 +170,8 @@ impl Engine {
             job: sys::Job::new(),
             listener: OnceLock::new(),
             next_id: AtomicU64::new(1),
+            blocks: Blocks::new(stats),
+            view_level: AtomicU8::new(0),
         }
     }
 
@@ -226,6 +239,11 @@ impl Engine {
         } else {
             (clock(), "INFO".to_string(), line.to_string())
         };
+        self.blocks.observe(&text);
+        // sing-box may run more talkative than chosen, to report blocks
+        if level_rank(&level) < self.view_level.load(Ordering::Relaxed) {
+            return;
+        }
         self.push_log(time, level, "core", text);
     }
 
@@ -237,16 +255,28 @@ impl Engine {
         if t.file.read_to_end(&mut buf).is_err() || buf.is_empty() {
             return;
         }
+        t.read += buf.len() as u64;
         t.partial.extend_from_slice(&buf);
         while let Some(i) = t.partial.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = t.partial.drain(..=i).collect();
             self.push_core_line(&String::from_utf8_lossy(&line));
         }
+        if t.writable && t.read > LOG_FILE_LIMIT && t.file.set_len(0).is_ok() {
+            let _ = t.file.seek(SeekFrom::Start(0));
+            t.read = 0;
+            t.partial.clear();
+        }
     }
 
     fn start_tail(self: &Arc<Self>, path: PathBuf, id: u64) {
-        let Ok(file) = std::fs::File::open(&path) else { return };
-        *self.tail.lock().unwrap_or_else(|e| e.into_inner()) = Some(LogTail { file, partial: Vec::new() });
+        let (file, writable) = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(f) => (f, true),
+            Err(_) => match std::fs::File::open(&path) {
+                Ok(f) => (f, false),
+                Err(_) => return,
+            },
+        };
+        *self.tail.lock().unwrap_or_else(|e| e.into_inner()) = Some(LogTail { file, partial: Vec::new(), read: 0, writable });
         let me = self.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(150));
@@ -298,6 +328,7 @@ impl Engine {
         let r = self.start_inner(req).await;
         if let Err(e) = &r {
             self.kill_current();
+            self.blocks.end();
             if e == NEED_ADMIN {
                 self.set_status(Status::new(Phase::Stopped));
             } else {
@@ -381,6 +412,15 @@ impl Engine {
             self.log_app("INFO", &format!("Ядро: sing-box-lx {}", retunl_core::SING_BOX_LX_VERSION));
         }
         let mut built = built;
+        // Blocks are only reported at debug level: run sing-box that way and
+        // keep showing the lines of the level the user chose.
+        let counting = has_reject(&built.config);
+        let view = level_rank(&data.settings.log_level.to_ascii_uppercase());
+        if counting && view > level_rank("DEBUG") {
+            built.config["log"]["level"] = Value::from("debug");
+        }
+        self.view_level.store(if counting { view } else { 0 }, Ordering::Relaxed);
+        self.blocks.begin(counting);
         // for development: run proxy mode without touching the Windows proxy setting
         if std::env::var_os("RETUNL_NO_SYSTEM_PROXY").is_some() {
             if let Some(list) = built.config.get_mut("inbounds").and_then(Value::as_array_mut) {
@@ -535,6 +575,7 @@ impl Engine {
             drop(g);
             // the last lines explain why it ended
             self.drain_tail();
+            self.blocks.end();
             if session.mode == InboundMode::SystemProxy && sys::clear_system_proxy_if(session.mixed_port) {
                 self.log_app("INFO", "Системный прокси выключен");
             }
@@ -623,6 +664,7 @@ impl Engine {
                 sys::clear_system_proxy_if(session.mixed_port);
             }
         }
+        self.blocks.save();
     }
 
     // ---------- live data ----------
@@ -638,11 +680,12 @@ impl Engine {
 
     pub async fn poll(&self, with_connections: bool) -> Poll {
         let status = self.status();
+        let blocks = self.blocks.stats();
         let Some(session) = self.session() else {
-            return Poll { status, traffic: None, connections: None };
+            return Poll { status, traffic: None, connections: None, blocks };
         };
         let Ok(v) = session.clash.connections().await else {
-            return Poll { status, traffic: None, connections: None };
+            return Poll { status, traffic: None, connections: None, blocks };
         };
         let up_total = v.get("uploadTotal").and_then(Value::as_u64).unwrap_or(0);
         let down_total = v.get("downloadTotal").and_then(Value::as_u64).unwrap_or(0);
@@ -665,7 +708,7 @@ impl Engine {
         };
         let traffic = Traffic { up, down, up_total, down_total, connections: list.len() };
         let connections = with_connections.then(|| list.iter().map(|c| conn_view(c, &session)).collect());
-        Poll { status, traffic: Some(traffic), connections }
+        Poll { status, traffic: Some(traffic), connections, blocks }
     }
 
     pub async fn close_connection(&self, id: &str) -> Result<(), String> {
@@ -727,6 +770,28 @@ fn rule_label(raw: &str, signatures: &[(String, Vec<String>)]) -> String {
         }
     }
     cond.chars().take(80).collect()
+}
+
+/// Order of sing-box log levels, most talkative first.
+fn level_rank(level: &str) -> u8 {
+    match level {
+        "TRACE" => 0,
+        "DEBUG" => 1,
+        "WARN" | "WARNING" => 3,
+        "ERROR" => 4,
+        "FATAL" => 5,
+        "PANIC" => 6,
+        _ => 2,
+    }
+}
+
+/// The config has a rule that blocks (a route or DNS `reject`).
+fn has_reject(config: &Value) -> bool {
+    ["route", "dns"].iter().any(|k| {
+        config[k]["rules"]
+            .as_array()
+            .is_some_and(|rules| rules.iter().any(|r| r["action"] == "reject"))
+    })
 }
 
 fn describe_route(data: &AppData) -> Option<String> {
@@ -852,7 +917,7 @@ mod tests {
         data.settings.mixed_port = pick_port(0);
         let port = data.settings.mixed_port;
 
-        let engine = Arc::new(Engine::new());
+        let engine = Arc::new(Engine::new(None));
         let req = StartRequest { data, paths: paths.clone(), http: crate::fetch::http_client(), elevated: false };
         engine.start(req).await.expect("connect");
         assert_eq!(engine.status().phase, Phase::Running);
@@ -868,6 +933,72 @@ mod tests {
         assert!(port_free(port), "sing-box still holds the port");
         let (lines, _) = engine.logs_after(0);
         assert!(lines.iter().any(|l| l.source == "core"), "no sing-box output in the log");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A block rule: the request is counted, and the debug lines sing-box
+    /// prints for it stay out of a log set to the normal level.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn counts_blocked_requests() {
+        let Some(core) = test_core() else {
+            eprintln!("sing-box not found, skipping");
+            return;
+        };
+        std::env::set_var("RETUNL_NO_SYSTEM_PROXY", "1");
+        let dir = std::env::temp_dir().join(format!("retunl-blocks-{}", uuid::Uuid::new_v4().simple()));
+        let paths = Paths { exe_dir: dir.clone(), data_dir: dir.join("data"), local_dir: dir.join("local"), portable: false };
+        for d in [paths.data_dir.clone(), paths.core_dir(), paths.ruleset_dir(), paths.run_dir()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::copy(&core, paths.core_dir().join(crate::paths::CORE_EXE)).unwrap();
+
+        let mut data = AppData::default();
+        data.settings.mode = InboundMode::SystemProxy;
+        data.settings.final_route = Route::Direct;
+        data.settings.mixed_port = pick_port(0);
+        data.settings.log_level = "info".into();
+        // the other test runs at the same time: its own control port
+        data.settings.controller_port = pick_port(0);
+        data.rules.push(retunl_core::Rule {
+            id: "ads".into(),
+            name: "Реклама".into(),
+            enabled: true,
+            domains: vec!["blocked.example".into()],
+            route: Route::Block,
+            ..Default::default()
+        });
+        let port = data.settings.mixed_port;
+
+        let stats = paths.data_dir.join("stats.json");
+        let engine = Arc::new(Engine::new(Some(stats.clone())));
+        let req = StartRequest { data, paths: paths.clone(), http: crate::fetch::http_client(), elevated: false };
+        engine.start(req).await.expect("connect");
+        let http = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).unwrap())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let r = http.get("http://ads.blocked.example/pixel").send().await;
+        assert!(r.as_ref().map_or(true, |r| !r.status().is_success()), "the blocked request went through: {r:?}");
+        let until = Instant::now() + Duration::from_secs(5);
+        while engine.blocks.stats().session == 0 && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let s = engine.poll(false).await.blocks;
+        assert_eq!(s.session, 1);
+        assert!(s.counting);
+        assert_eq!(s.top, vec![("ads.blocked.example".to_string(), 1)]);
+
+        engine.stop().await;
+        let until = Instant::now() + Duration::from_secs(10);
+        while engine.status().phase != Phase::Stopped && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (lines, _) = engine.logs_after(0);
+        assert!(lines.iter().any(|l| l.source == "core"), "no sing-box output in the log");
+        assert!(!lines.iter().any(|l| l.level == "DEBUG"), "debug lines leaked into the log");
+        // the total is saved when the connection ends
+        assert_eq!(Engine::new(Some(stats)).blocks.stats().total, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -23,7 +23,7 @@ export const servers = {
     const has = d.profiles.length > 0;
     root.append(pageHead('Серверы', [
       has && h('button.btn', { onclick: (e) => testLatency(e.currentTarget, null) }, icon('speed'), 'Проверить задержку'),
-      d.subscriptions.length && h('button.btn', { onclick: (e) => updateAll(e.currentTarget) }, icon('refresh'), 'Обновить подписки'),
+      d.subscriptions.length > 0 && h('button.btn', { onclick: (e) => updateAll(e.currentTarget) }, icon('refresh'), 'Обновить подписки'),
       has && h('button.btn', { onclick: exportDialog, title: 'Зашифровать выбранные подписки и серверы паролем, чтобы перенести на другой компьютер' }, icon('lock'), 'Экспорт'),
       h('button.btn.primary', { onclick: addDialog }, icon('plus'), 'Добавить'),
     ], has ? 'Выбранный сервер используется для правил «Через VPN». Ссылку или файл можно просто перетащить в окно.' : null));
