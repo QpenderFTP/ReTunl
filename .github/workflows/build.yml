@@ -134,7 +134,7 @@ jobs:
 
       # libbox (sing-box-lx with the Clash API) takes long to build: it is kept
       # between runs and built again only when tools/build-libbox.sh changes
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         id: libbox
         with:
           path: .tools/libbox-*-retunl.aar
@@ -149,6 +149,12 @@ jobs:
           LIBBOX_TARGETS: android/arm64,android/arm
           LIBBOX_ABIS: arm64-v8a armeabi-v7a
         run: bash tools/prepare-libbox.sh
+      # saved straight away: a failure in a later step should not cost another core build
+      - uses: actions/cache/save@v4
+        if: steps.libbox.outputs.cache-hit != 'true'
+        with:
+          path: .tools/libbox-*-retunl.aar
+          key: ${{ steps.libbox.outputs.cache-primary-key }}
 
       - name: Signing key
         env:
