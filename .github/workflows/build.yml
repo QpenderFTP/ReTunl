@@ -108,6 +108,7 @@ jobs:
     env:
       NDK_VERSION: 29.0.14206865
       ANDROID_PLATFORM: android-37.0
+      TAURI_CLI_VERSION: 2.12.4
     steps:
       - uses: actions/checkout@v4
 
@@ -123,6 +124,11 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
       - uses: Swatinem/rust-cache@v2
+
+      # Gradle calls the CLI back as `cargo tauri` while it builds the APK
+      # (gen/android/buildSrc/.../BuildTask.kt), so here it is the cargo one, not npx
+      - name: Tauri CLI
+        run: curl -sSfL "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$TAURI_CLI_VERSION/cargo-tauri-x86_64-unknown-linux-gnu.tgz" | tar xz -C "$HOME/.cargo/bin" cargo-tauri
 
       - name: Android NDK and platform
         run: |
@@ -173,7 +179,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: npx --yes @tauri-apps/cli@2 android build --apk --split-per-abi --target aarch64 --target armv7
+        run: cargo tauri android build --apk --split-per-abi --target aarch64 --target armv7
 
       - name: Name the APKs
         run: |
