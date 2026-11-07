@@ -18,6 +18,26 @@ pub const PRESETS: &[(&str, &str)] = &[
     ("local", "Системный DNS Windows"),
 ];
 
+/// Public resolvers that also serve DNS-over-TLS (port 853) on the same IP,
+/// with a certificate for that IP: Yandex, Cloudflare, Google, AdGuard.
+const DOT_BY_IP: &[&str] = &["77.88.8.8", "77.88.8.1", "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "94.140.14.14", "94.140.15.15"];
+
+/// The resolver's IP when `spec` is plain DNS (port 53) to one of the
+/// resolvers above, so the same resolver can be used over TLS instead.
+pub fn dot_ip(spec: &str) -> Option<&'static str> {
+    let spec = spec.trim();
+    let rest = match spec.split_once("://") {
+        Some((kind, rest)) if kind.eq_ignore_ascii_case("udp") || kind.eq_ignore_ascii_case("tcp") => rest,
+        Some(_) => return None,
+        None => spec,
+    };
+    let (host, port) = split_host_port(rest.trim_end_matches('/'));
+    if port.is_some_and(|p| p != "53") {
+        return None;
+    }
+    DOT_BY_IP.iter().copied().find(|ip| *ip == host)
+}
+
 /// Build a DNS server. `bootstrap` is the tag used to resolve a resolver
 /// given by name (e.g. `dns.google`).
 pub fn server(spec: &str, tag: &str, detour: Option<&str>, bootstrap: &str) -> Result<Value, String> {
@@ -79,6 +99,19 @@ pub fn server(spec: &str, tag: &str, detour: Option<&str>, bootstrap: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_dns_with_a_tls_port() {
+        assert_eq!(dot_ip("77.88.8.8"), Some("77.88.8.8"));
+        assert_eq!(dot_ip(" udp://1.1.1.1:53 "), Some("1.1.1.1"));
+        assert_eq!(dot_ip("tcp://8.8.8.8"), Some("8.8.8.8"));
+        // already encrypted, another port, unknown or local resolvers stay as they are
+        assert_eq!(dot_ip("tls://77.88.8.8"), None);
+        assert_eq!(dot_ip("https://1.1.1.1/dns-query"), None);
+        assert_eq!(dot_ip("77.88.8.8:5353"), None);
+        assert_eq!(dot_ip("192.168.0.1"), None);
+        assert_eq!(dot_ip("local"), None);
+    }
 
     #[test]
     fn shapes() {

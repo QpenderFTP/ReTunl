@@ -310,6 +310,33 @@ impl Engine {
         r
     }
 
+    /// Strict route on Windows blocks DNS port 53 outside the tunnel, and on
+    /// some PCs that hits sing-box's own queries as well: direct sites then
+    /// never resolve. A known public resolver can answer on its TLS port
+    /// (853) instead, if this network lets that port through.
+    async fn direct_dns_tls(&self, data: &AppData) -> bool {
+        let s = &data.settings;
+        if !cfg!(windows) || s.mode != InboundMode::Tun || !s.tun.strict_route {
+            return false;
+        }
+        let Some(ip) = retunl_core::dns::dot_ip(&s.dns.direct) else { return false };
+        let addr: std::net::SocketAddr = match format!("{ip}:853").parse() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        let open = tokio::task::spawn_blocking(move || {
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).is_ok()
+        })
+        .await
+        .unwrap_or(false);
+        if open {
+            self.log_app("INFO", &format!("DNS для прямых соединений ({ip}) — через TLS, порт 853: строгая маршрутизация закрывает порт 53."));
+        } else {
+            self.log_app("INFO", &format!("Порт 853 у DNS {ip} не отвечает, DNS для прямых соединений идёт через порт 53."));
+        }
+        open
+    }
+
     async fn start_inner(self: &Arc<Self>, req: StartRequest) -> Result<(), String> {
         let StartRequest { mut data, paths, http, elevated } = req;
         let mode = data.settings.mode;
@@ -332,6 +359,7 @@ impl Engine {
                 data.settings.mixed_port
             ));
         }
+        let direct_dns_tls = self.direct_dns_tls(&data).await;
         let secret = uuid::Uuid::new_v4().simple().to_string();
         let built = singbox::build(
             &data,
@@ -340,6 +368,7 @@ impl Engine {
                 controller_secret: secret.clone(),
                 cache_file: Some(paths.run_dir().join("cache.db")),
                 extended_available: paths.find_lx_core().is_some(),
+                direct_dns_tls,
             },
         )
         .map_err(|e| e.0)?;

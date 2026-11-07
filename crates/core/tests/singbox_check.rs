@@ -163,7 +163,7 @@ fn every_protocol_as_the_active_server() {
         let name = p.name.clone();
         d.settings.active_profile = Some(p.id.clone());
         d.profiles.push(p);
-        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false };
+        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false };
         let built = build(&d, &opts).unwrap();
         check(&bin, &dir, &format!("proto-{i}-{}", name.replace(['/', ':'], "_")), &built.config);
     }
@@ -208,7 +208,7 @@ fn rules_presets_and_modes() {
         ..Default::default()
     });
     let names: Vec<String> = {
-        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false };
+        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false };
         build(&d, &opts).unwrap().rule_sets.iter().map(|r| r.file_name.clone()).collect()
     };
     make_rule_sets(&bin, &dir, &names);
@@ -242,6 +242,7 @@ fn rules_presets_and_modes() {
             controller_secret: "x".into(),
             cache_file: Some(dir.join("cache.db")),
             extended_available: false,
+            direct_dns_tls: false,
         };
         let built = build(&d2, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
         check(&bin, &dir, name, &built.config);
@@ -278,7 +279,7 @@ fn interface_profile_and_wg_conf() {
         route: Route::Profile { id: "if".into() },
         ..Default::default()
     });
-    let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false };
+    let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false };
     check(&bin, &dir, "iface", &build(&d, &opts).unwrap().config);
 }
 
@@ -320,7 +321,7 @@ fn amneziawg_and_xhttp_need_sing_box_lx() {
     d.profiles.push(profile("xh", "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&type=xhttp&path=%2Fxh&mode=auto&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#XHTTP"));
     d.settings.active_profile = Some("awg".into());
     d.rules.push(Rule { id: "r".into(), name: "curl".into(), enabled: true, apps: vec!["curl.exe".into()], route: Route::Profile { id: "xh".into() }, ..Default::default() });
-    let opts = |lx: bool| BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: lx };
+    let opts = |lx: bool| BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: lx, direct_dns_tls: false };
     for mode in [InboundMode::Tun, InboundMode::SystemProxy] {
         d.settings.mode = mode;
         let built = build(&d, &opts(true)).unwrap();

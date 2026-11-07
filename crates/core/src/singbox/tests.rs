@@ -10,7 +10,7 @@ fn profile(id: &str, link: &str) -> Profile {
 }
 
 fn opts() -> BuildOptions {
-    BuildOptions { ruleset_dir: PathBuf::from("C:\\rs"), controller_secret: "s3cret".into(), cache_file: None, extended_available: false }
+    BuildOptions { ruleset_dir: PathBuf::from("C:\\rs"), controller_secret: "s3cret".into(), cache_file: None, extended_available: false, direct_dns_tls: false }
 }
 
 fn base() -> AppData {
@@ -251,4 +251,27 @@ fn probe_config() {
     assert_eq!(c["outbounds"][1]["tag"], "p1");
     assert_eq!(c["outbounds"][2]["tag"], "p2");
     assert!(c.get("inbounds").is_none());
+}
+
+#[test]
+fn strict_tun_sends_direct_dns_over_tls() {
+    let mut d = base();
+    d.settings.mode = InboundMode::Tun;
+    d.settings.tun.strict_route = true;
+    let tls = BuildOptions { direct_dns_tls: true, ..opts() };
+    let c = build(&d, &tls).unwrap().config;
+    assert_eq!(c["dns"]["servers"][0], json!({"type": "tls", "tag": DNS_DIRECT, "server": "77.88.8.8"}));
+    // the engine's check is required
+    let c = build(&d, &opts()).unwrap().config;
+    assert_eq!(c["dns"]["servers"][0]["type"], "udp");
+    // only TUN with strict route needs it
+    d.settings.tun.strict_route = false;
+    assert_eq!(build(&d, &tls).unwrap().config["dns"]["servers"][0]["type"], "udp");
+    d.settings.tun.strict_route = true;
+    d.settings.mode = InboundMode::SystemProxy;
+    assert_eq!(build(&d, &tls).unwrap().config["dns"]["servers"][0]["type"], "udp");
+    // a resolver without a TLS port stays as chosen
+    d.settings.mode = InboundMode::Tun;
+    d.settings.dns.direct = "192.168.0.1".into();
+    assert_eq!(build(&d, &tls).unwrap().config["dns"]["servers"][0], json!({"type": "udp", "tag": DNS_DIRECT, "server": "192.168.0.1"}));
 }

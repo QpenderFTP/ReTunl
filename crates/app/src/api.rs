@@ -767,6 +767,8 @@ pub fn preview_config(st: St<'_>) -> R<String> {
             controller_secret: "••••".into(),
             cache_file: None,
             extended_available: st.paths.find_lx_core().is_some(),
+            // the preview shows the settings as chosen; the TLS switch happens on connect
+            direct_dns_tls: false,
         },
     )
     .map_err(|e| e.0)?;

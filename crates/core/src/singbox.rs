@@ -27,6 +27,11 @@ pub struct BuildOptions {
     pub cache_file: Option<PathBuf>,
     /// sing-box-lx is installed (AmneziaWG, XHTTP).
     pub extended_available: bool,
+    /// TUN with strict route: send direct DNS to a known public resolver over
+    /// TLS (port 853). Strict route on Windows blocks DNS port 53 outside the
+    /// tunnel, and on some PCs that catches sing-box's own queries too. The
+    /// engine sets it after checking that the resolver answers on 853.
+    pub direct_dns_tls: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -591,7 +596,12 @@ pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
     // 3. DNS
     let mut dns_servers: Vec<Value> = Vec::new();
     let mut need_bootstrap = false;
-    let direct = dns::server(&s.dns.direct, DNS_DIRECT, None, DNS_BOOTSTRAP)
+    let dot = opts.direct_dns_tls && s.mode == InboundMode::Tun && s.tun.strict_route;
+    let direct_spec = match dns::dot_ip(&s.dns.direct) {
+        Some(ip) if dot => format!("tls://{ip}"),
+        _ => s.dns.direct.clone(),
+    };
+    let direct = dns::server(&direct_spec, DNS_DIRECT, None, DNS_BOOTSTRAP)
         .map_err(|e| BuildError(format!("DNS для прямого трафика: {e}")))?;
     need_bootstrap |= direct.get("domain_resolver").is_some();
     dns_servers.push(direct);
@@ -606,7 +616,7 @@ pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
         None => None,
     };
     if need_bootstrap {
-        dns_servers.push(json!({"type": "udp", "tag": DNS_BOOTSTRAP, "server": BOOTSTRAP_SERVER}));
+        dns_servers.push(json!({"type": if dot { "tls" } else { "udp" }, "tag": DNS_BOOTSTRAP, "server": BOOTSTRAP_SERVER}));
     }
     let mut dns_rules: Vec<Value> = Vec::new();
     for (parts, match_all, target) in &user_rules {
