@@ -6,6 +6,11 @@
 # The APKs are signed with the release key from the repository secrets
 # ANDROID_KEYSTORE_B64 (the .jks file in base64), ANDROID_KEYSTORE_PASSWORD,
 # ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD.
+#
+# A tag build sees only the caches of its own tag and of main. So a push to main
+# that changes the Android build (this file, the libbox scripts, the Gradle
+# wrapper) runs the android job alone, and its caches serve every later tag.
+# Run the workflow by hand on main to refresh the Windows and macOS caches too.
 
 name: Build
 
@@ -13,6 +18,13 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+    branches: [main]
+    # not checked for tags: every tag builds
+    paths:
+      - .github/workflows/build.yml
+      - tools/build-libbox.sh
+      - tools/prepare-libbox.sh
+      - crates/app/gen/android/gradle/wrapper/gradle-wrapper.properties
 
 permissions:
   contents: write
@@ -24,6 +36,8 @@ env:
 
 jobs:
   windows:
+    # a push to main only warms the Android caches
+    if: github.event_name != 'push' || github.ref_type == 'tag'
     runs-on: windows-latest
     defaults:
       run:
@@ -61,6 +75,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    if: github.event_name != 'push' || github.ref_type == 'tag'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -161,6 +176,22 @@ jobs:
         with:
           path: .tools/libbox-*-retunl.aar
           key: ${{ steps.libbox.outputs.cache-primary-key }}
+
+      # services.gradle.org sometimes stalls: Gradle is kept between runs and,
+      # when missing, fetched here with retries before the APK build needs it
+      - uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper/dists
+          key: gradle-dist-${{ hashFiles('crates/app/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+      - name: Gradle
+        working-directory: crates/app/gen/android
+        run: |
+          for i in 1 2 3; do
+            ./gradlew --version > /dev/null && exit 0
+            echo "::warning::Gradle download failed (attempt $i)"
+            sleep 20
+          done
+          exit 1
 
       - name: Signing key
         env:

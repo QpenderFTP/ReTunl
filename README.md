@@ -240,6 +240,8 @@ cargo tauri android build --apk --split-per-abi --target aarch64 --target armv7
 
 В GitHub Actions APK собирает задача `android`. Ключ ей нужен в секретах репозитория («Settings» → «Secrets and variables» → «Actions»): `ANDROID_KEYSTORE_B64` (файл ключа в base64), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
 
+Ядро libbox, Gradle и сборка Rust для телефонов хранятся в кэше GitHub. Сборка по тегу видит только кэш своего тега и ветки `main`. Поэтому изменения сборки Android в `main` (сценарий CI, скрипты libbox, версия Gradle) сразу запускают одну задачу `android`: она наполняет кэш для следующих релизов. Кэш сборок для Windows и macOS обновляет ручной запуск «Run workflow» на `main`.
+
 На Windows `tauri android build` не может создать символическую ссылку на библиотеку без режима разработчика. Тогда скопируйте `target/<цель>/release/libretunl_lib.so` в `gen/android/app/src/main/jniLibs/<abi>/` и запустите Gradle с `-x rustBuild…`.
 
 ### Устройство
