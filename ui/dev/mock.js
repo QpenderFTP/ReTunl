@@ -46,7 +46,7 @@
       dns: { direct: '77.88.8.8', remote: 'https://1.1.1.1/dns-query', policy: 'auto' },
       tun: { interface_name: 'ReTunl', stack: 'mixed', mtu: 9000, strict_route: false },
       mixed_port: 2080, controller_port: 19190, direct_interface: null, log_level: 'info',
-      test_url: 'https://www.gstatic.com/generate_204', connect_on_launch: false, close_to_tray: true, start_minimized: true, core: 'auto',
+      test_url: 'https://www.gstatic.com/generate_204', connect_on_launch: false, close_to_tray: true, start_minimized: true, run_as_admin: true, core: 'auto',
     },
   };
   if (/empty/.test(location.hash)) { data.profiles = []; data.subscriptions = []; data.rules = []; data.settings.active_profile = null; }
@@ -87,7 +87,7 @@
     logs.push({ seq: ++seq, time: d.toTimeString().slice(0, 8), level, source, text });
     if (logs.length > 4000) logs.shift();
   };
-  log('info', 'ReTunl 0.2.1 запущен', 'app');
+  log('info', 'ReTunl 0.2.2 запущен', 'app');
 
   const setStatus = (s) => { status = { ...status, ...s }; emit('status', clone(status)); };
 
@@ -353,7 +353,7 @@
 
   const handlers = {
     ...adminHandlers,
-    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.1', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
+    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.2', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });

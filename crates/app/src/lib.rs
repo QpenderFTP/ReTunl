@@ -49,13 +49,44 @@ fn cleanup(remove_autostart: bool) {
         .unwrap_or_else(|| retunl_core::model::AppData::default().settings.mixed_port);
     sys::clear_system_proxy_if(port);
     if remove_autostart {
-        let _ = sys::set_autostart(false);
+        let _ = sys::set_autostart(false, false);
     }
+}
+
+/// Windows, a start without admin rights. True when this process should end:
+/// a ReTunl that already runs took over, or the elevated copy has started.
+#[cfg(windows)]
+fn start_elevated(args: &[String], id: &str) -> bool {
+    if sys::is_elevated() {
+        return false;
+    }
+    if sys::show_running_instance(id) {
+        return true;
+    }
+    // our own elevated start came out without the rights (UAC is off on a
+    // standard account): go on as is instead of asking again and again
+    if args.iter().any(|a| a == "--elevated-start") {
+        return false;
+    }
+    let wanted = std::fs::read_to_string(paths::Paths::locate().data_file())
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["settings"]["run_as_admin"].as_bool())
+        .unwrap_or_else(|| retunl_core::model::AppData::default().settings.run_as_admin);
+    if !wanted {
+        return false;
+    }
+    let mut pass: Vec<&str> =
+        args.iter().skip(1).map(String::as_str).filter(|a| matches!(*a, "--autostart" | "--connect")).collect();
+    pass.push("--elevated-start");
+    // declined in UAC: start without the rights, «Все программы» offers the restart again
+    sys::relaunch_elevated(&pass.join(" ")).is_ok()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
+    let context = tauri::generate_context!();
     #[cfg(desktop)]
     {
         // --cleanup: the uninstaller; --clear-proxy: the installer after closing a running copy
@@ -66,6 +97,10 @@ pub fn run() {
         // relaunched as admin: let the old instance exit first (single instance lock)
         if let Some(pid) = arg_value(&args, "--wait-pid").and_then(|p| p.parse().ok()) {
             sys::wait_for_pid(pid, 8000);
+        }
+        #[cfg(windows)]
+        if start_elevated(&args, &context.config().identifier) {
+            return;
         }
     }
     let autostart = args.iter().any(|a| a == "--autostart");
@@ -121,6 +156,25 @@ pub fn run() {
                     if state.elevated { " с правами администратора" } else { "" }
                 ),
             );
+
+            #[cfg(windows)]
+            if state.elevated {
+                if !sys::allow_instance_messages(&handle.config().identifier) {
+                    state.engine.log_app("WARN", "Ярлык не сможет открыть окно ReTunl, запущенного от администратора");
+                }
+                // autostart from before: move it to Task Scheduler, so the next logon is elevated without UAC
+                if state.snapshot().settings.run_as_admin {
+                    let s = state.clone();
+                    std::thread::spawn(move || {
+                        if sys::autostart_needs_admin() {
+                            match sys::set_autostart(true, true) {
+                                Ok(_) => s.engine.log_app("INFO", "Автозапуск теперь через планировщик заданий, с правами администратора"),
+                                Err(e) => s.engine.log_app("WARN", &format!("Автозапуск с правами администратора не настроен: {e}")),
+                            }
+                        }
+                    });
+                }
+            }
 
             // Android: the VPN may still run from before the window was closed
             #[cfg(target_os = "android")]
@@ -240,7 +294,7 @@ pub fn run() {
             admin::commands::admin_use_client,
             admin::commands::admin_save_conf,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to start ReTunl");
 
     app.run(|_app, _event| {

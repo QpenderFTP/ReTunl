@@ -338,6 +338,9 @@ pub struct Settings {
     pub connect_on_launch: bool,
     pub close_to_tray: bool,
     pub start_minimized: bool,
+    /// Windows: every start is elevated. A start by hand asks UAC; autostart goes
+    /// through Task Scheduler and does not.
+    pub run_as_admin: bool,
 }
 
 impl Default for Settings {
@@ -361,6 +364,8 @@ impl Default for Settings {
             close_to_tray: true,
             // only applies when started by autostart
             start_minimized: true,
+            // «Все программы», the default mode, needs admin rights on Windows anyway
+            run_as_admin: true,
         }
     }
 }

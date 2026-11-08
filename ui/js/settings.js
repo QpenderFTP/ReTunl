@@ -108,8 +108,13 @@ export const settingsPage = {
     let autoNote = 'ReTunl запустится в трее при входе в Windows.';
     if (isMac()) autoNote = 'ReTunl запустится в строке меню при входе в macOS.' + (set.mode === 'tun' && set.connect_on_launch ? ' Для режима «Все программы» macOS спросит пароль администратора.' : '');
     else if (auto.enabled && auto.elevated) autoNote = 'Запускается через планировщик заданий с правами администратора, без запроса Windows.';
-    else if (auto.enabled && set.mode === 'tun') autoNote = 'Запускается без прав администратора. Чтобы режим «Все программы» подключался сам, включите автозапуск заново из ReTunl, запущенного от администратора.';
-    else if (!auto.enabled && v.elevated) autoNote = 'ReTunl запущен от администратора, поэтому автозапуск будет без запроса прав.';
+    else if (set.run_as_admin && v.elevated) autoNote = 'ReTunl запустится в трее с правами администратора, без запроса Windows.';
+    else if (set.run_as_admin) autoNote = 'При входе Windows спросит подтверждение. Чтобы автозапуск обходился без него, запустите ReTunl с правами администратора.';
+    else if (set.mode === 'tun') autoNote = 'ReTunl запустится без прав администратора, поэтому режим «Все программы» сам не подключится.';
+
+    let adminNote = 'Права нужны только режиму «Все программы»: при подключении ReTunl предложит перезапуститься с ними.';
+    if (set.run_as_admin && v.elevated) adminNote = 'Windows спрашивает подтверждение, когда ReTunl запускают вручную. Автозапуск обходится без него.';
+    else if (set.run_as_admin) adminNote = 'Сейчас ReTunl работает без этих прав: запуск не подтвердили. Windows спросит снова при следующем запуске.';
 
     const phone = isAndroid();
     // Android: always the system VPN, no tray, no autostart, the core is built in
@@ -125,6 +130,7 @@ export const settingsPage = {
         seg([{ value: 'tun', label: 'Все программы' }, { value: 'system_proxy', label: 'Системный прокси' }], set.mode,
           (m) => patch({ mode: m }), { label: 'Что перехватывать' })),
       setRow('Подключаться при запуске ReTunl', null, toggle(set.connect_on_launch, (on) => patch({ connect_on_launch: on }), { id: 'set-col' }), 'set-col'),
+      isMac() ? null : setRow('Запускать с правами администратора', adminNote, toggle(set.run_as_admin, (on) => patch({ run_as_admin: on }), { id: 'set-admin' }), 'set-admin'),
       setRow(`Запускать вместе с ${osName()}`, autoNote, toggle(auto.enabled, async (on) => {
         try {
           await invoke('set_autostart', { enabled: on });
@@ -135,7 +141,7 @@ export const settingsPage = {
       }, { id: 'set-auto' }), 'set-auto'),
       setRow('При автозапуске сразу в трей', 'Окно не показывается, ReTunl ждёт в области уведомлений.', toggle(set.start_minimized, (on) => patch({ start_minimized: on }), { id: 'set-min' }), 'set-min'),
       setRow('Крестик сворачивает в трей', 'Если выключить, закрытие окна отключит VPN и завершит программу.', toggle(set.close_to_tray, (on) => patch({ close_to_tray: on }), { id: 'set-tray' }), 'set-tray'),
-    ]));
+    ].filter(Boolean)));
 
     root.append(section('Маршрутизация', [
       setRow('Локальная сеть мимо VPN', 'Роутер, принтеры, общие папки и другие устройства дома.', toggle(set.bypass_lan, (on) => patch({ bypass_lan: on }), { id: 'set-lan' }), 'set-lan'),

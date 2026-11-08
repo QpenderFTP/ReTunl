@@ -120,6 +120,85 @@ pub fn relaunch_elevated(args: &str) -> Result<(), String> {
     }
 }
 
+// The single-instance plugin's lock and message window: `{identifier}-sim`, `-sic`, `-siw`.
+fn instance_window(id: &str) -> windows_sys::Win32::Foundation::HWND {
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let class = wide(&format!("{id}-sic"));
+    let title = wide(&format!("{id}-siw"));
+    unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) }
+}
+
+/// Bring up the window of a ReTunl that already runs; false if none does.
+///
+/// The single-instance plugin does this by itself between copies with the same
+/// rights. A copy without admin rights cannot open the lock of an elevated one,
+/// though, and would start next to it: this check runs before the plugin and
+/// sends the plugin's own message (the elevated copy lets it in, see
+/// `allow_instance_messages`).
+pub fn show_running_instance(id: &str) -> bool {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
+    use windows_sys::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, GetWindowThreadProcessId, SendMessageTimeoutW, SMTO_NORMAL, WM_COPYDATA,
+    };
+    let name = wide(&format!("{id}-sim"));
+    unsafe {
+        let lock = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr());
+        if lock.is_null() {
+            // denied means it exists but belongs to an elevated copy
+            if GetLastError() != ERROR_ACCESS_DENIED {
+                return false;
+            }
+        } else {
+            CloseHandle(lock);
+        }
+        // a copy that is just starting creates the window a moment after the lock
+        let mut hwnd = instance_window(id);
+        for _ in 0..40 {
+            if !hwnd.is_null() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            hwnd = instance_window(id);
+        }
+        if hwnd.is_null() {
+            return true;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 {
+            AllowSetForegroundWindow(pid);
+        }
+        // the plugin's format: the working folder, then each argument, separated by NUL
+        let mut data = std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned();
+        for arg in std::env::args() {
+            data.push('\0');
+            data.push_str(&arg);
+        }
+        let cds = COPYDATASTRUCT { dwData: 1543, cbData: data.len() as u32, lpData: data.as_ptr() as *mut _ };
+        SendMessageTimeoutW(hwnd, WM_COPYDATA, 0, &cds as *const _ as isize, SMTO_NORMAL, 5000, std::ptr::null_mut());
+    }
+    true
+}
+
+/// Windows drops messages from a process without admin rights to an elevated
+/// one. Let the plugin's "show the window" message in from a shortcut start.
+pub fn allow_instance_messages(id: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        ChangeWindowMessageFilterEx, GetWindowThreadProcessId, MSGFLT_ALLOW, WM_COPYDATA,
+    };
+    let hwnd = instance_window(id);
+    if hwnd.is_null() {
+        return false;
+    }
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        pid == std::process::id() && ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, std::ptr::null_mut()) != 0
+    }
+}
+
 pub fn wait_for_pid(pid: u32, timeout_ms: u32) {
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
     unsafe {
@@ -314,7 +393,9 @@ pub fn autostart_status() -> Autostart {
     Autostart { enabled: task || run, elevated: task }
 }
 
-pub fn set_autostart(enable: bool) -> Result<Autostart, String> {
+/// `admin`: start elevated at logon through Task Scheduler. Creating that task
+/// needs admin rights itself, so without them autostart goes to the Run key.
+pub fn set_autostart(enable: bool, admin: bool) -> Result<Autostart, String> {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
     use winreg::RegKey;
     let run = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE).map_err(|e| e.to_string())?;
@@ -327,7 +408,7 @@ pub fn set_autostart(enable: bool) -> Result<Autostart, String> {
         return Ok(autostart_status());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    if is_elevated() {
+    if admin && is_elevated() {
         // A scheduled task starts us elevated at logon without a UAC prompt.
         let xml = task_xml(&exe);
         let file = std::env::temp_dir().join("retunl-task.xml");
@@ -349,6 +430,27 @@ pub fn set_autostart(enable: bool) -> Result<Autostart, String> {
         run.set_value(TASK_NAME, &format!("\"{}\" --autostart", exe.display())).map_err(|e| e.to_string())?;
     }
     Ok(autostart_status())
+}
+
+/// Autostart that still starts this exe without admin rights (the Run key),
+/// left from before ReTunl ran elevated. Another copy's entry is not ours to move.
+pub fn autostart_needs_admin() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Ok(value) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(RUN_KEY)
+        .and_then(|k| k.get_value::<String, _>(TASK_NAME))
+    else {
+        return false;
+    };
+    run_value_exe(&value).is_some_and(|t| t.to_lowercase() == exe.to_string_lossy().to_lowercase())
+        && !autostart_status().elevated
+}
+
+/// The program a Run value starts: `"C:\…\retunl.exe" --autostart` → `C:\…\retunl.exe`.
+fn run_value_exe(value: &str) -> Option<&str> {
+    value.trim_start().strip_prefix('"')?.split('"').next()
 }
 
 fn task_xml(exe: &Path) -> String {
@@ -504,6 +606,29 @@ mod tests {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.tools/sing-box/sing-box-1.14.4-windows-amd64/sing-box.exe");
         p.exists().then_some(p)
+    }
+
+    #[test]
+    fn run_value_names_the_exe() {
+        assert_eq!(
+            run_value_exe(r#""C:\Program Files\ReTunl\retunl.exe" --autostart"#),
+            Some(r"C:\Program Files\ReTunl\retunl.exe")
+        );
+        assert_eq!(run_value_exe(r"C:\retunl.exe --autostart"), None);
+    }
+
+    #[test]
+    fn running_instance_is_found_by_its_lock() {
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        let id = format!("app.retunl.test-{}", std::process::id());
+        assert!(!show_running_instance(&id));
+        assert!(!allow_instance_messages(&id));
+        let name = wide(&format!("{id}-sim"));
+        let lock = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+        assert!(!lock.is_null());
+        // the lock without its window: a copy that is still starting
+        assert!(show_running_instance(&id));
+        unsafe { CloseHandle(lock) };
     }
 
     #[test]

@@ -236,7 +236,7 @@ pub fn autostart_status() -> Autostart {
 }
 
 /// A login item as a LaunchAgent: starts ReTunl with `--autostart` at login.
-pub fn set_autostart(enable: bool) -> Result<Autostart, String> {
+pub fn set_autostart(enable: bool, _admin: bool) -> Result<Autostart, String> {
     let path = agent_path().ok_or("Не найдена домашняя папка")?;
     if !enable {
         if path.exists() {

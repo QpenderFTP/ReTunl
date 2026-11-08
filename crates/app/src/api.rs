@@ -757,6 +757,7 @@ fn config_part(s: &Settings) -> Settings {
     c.connect_on_launch = false;
     c.close_to_tray = false;
     c.start_minimized = false;
+    c.run_as_admin = false;
     c.test_url = String::new();
     c
 }
@@ -779,6 +780,12 @@ pub fn update_settings(st: St<'_>, patch: Value) -> R<Settings> {
     })?;
     if config_part(&before) != config_part(&after) {
         st.request_reload();
+    }
+    // autostart follows: elevated through Task Scheduler or plain through the Run key
+    if cfg!(windows) && before.run_as_admin != after.run_as_admin && sys::autostart_status().enabled {
+        if let Err(e) = sys::set_autostart(true, after.run_as_admin) {
+            st.engine.log_app("WARN", &format!("Автозапуск не перенастроен: {e}"));
+        }
     }
     Ok(after)
 }
@@ -949,8 +956,8 @@ pub async fn relaunch_admin(app: AppHandle, st: St<'_>, connect: bool) -> R<()> 
 }
 
 #[tauri::command]
-pub fn set_autostart(enabled: bool) -> R<Autostart> {
-    sys::set_autostart(enabled)
+pub fn set_autostart(st: St<'_>, enabled: bool) -> R<Autostart> {
+    sys::set_autostart(enabled, st.snapshot().settings.run_as_admin)
 }
 
 #[tauri::command]

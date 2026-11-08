@@ -180,7 +180,7 @@ pub fn autostart_status() -> Autostart {
     Autostart::default()
 }
 
-pub fn set_autostart(_enable: bool) -> Result<Autostart, String> {
+pub fn set_autostart(_enable: bool, _admin: bool) -> Result<Autostart, String> {
     Err("На Android ReTunl не запускается сам при включении телефона.".into())
 }
 
