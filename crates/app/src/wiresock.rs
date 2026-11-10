@@ -43,6 +43,8 @@ pub fn find_client() -> Option<PathBuf> {
 
 /// What [`start`] needs, worked out before the main config is built (that
 /// config already points at the helper's port).
+// only Windows runs WireSock
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct Plan {
     pub link: WireSockLink,
     /// The server's name, for messages.
@@ -173,6 +175,7 @@ fn best_interface(ip: std::net::IpAddr) -> Option<String> {
 }
 
 /// The helper and WireSock, running. Dropping it stops both.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct Tunnel {
     pub link: WireSockLink,
     pub name: String,
