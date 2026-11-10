@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use retunl_core::links::parse_link;
 use retunl_core::model::*;
-use retunl_core::singbox::{build, build_probe, build_wiresock_helper, BuildOptions, WireSockLink};
+use retunl_core::singbox::{build, build_probe, BuildOptions};
 use retunl_core::{presets, wgconf};
 use retunl_core::awg::CoreKind;
 
@@ -336,8 +336,12 @@ fn amneziawg_and_xhttp_need_sing_box_lx() {
     assert!(build(&d, &opts(true)).unwrap_err().0.contains("официальное ядро"));
 }
 
+/// WireSock runs only on Windows: elsewhere its server is plain AmneziaWG,
+/// which wants sing-box-lx.
+#[cfg(windows)]
 #[test]
 fn wiresock_configs() {
+    use retunl_core::singbox::{build_wiresock_helper, WireSockLink};
     let Some(bin) = sing_box() else {
         eprintln!("sing-box not found, skipping");
         return;
