@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use retunl_core::links::parse_link;
 use retunl_core::model::*;
-use retunl_core::singbox::{build, build_probe, BuildOptions};
+use retunl_core::singbox::{build, build_probe, build_wiresock_helper, BuildOptions, WireSockLink};
 use retunl_core::{presets, wgconf};
 use retunl_core::awg::CoreKind;
 
@@ -115,7 +115,7 @@ fn run_briefly(bin: &Path, dir: &Path, name: &str, config: &serde_json::Value) {
 
 fn profile(id: &str, link: &str) -> Profile {
     let p = parse_link(link).unwrap_or_else(|e| panic!("{link}: {e}"));
-    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0 }
+    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: None }
 }
 
 // Real-looking keys so sing-box accepts them.
@@ -163,7 +163,7 @@ fn every_protocol_as_the_active_server() {
         let name = p.name.clone();
         d.settings.active_profile = Some(p.id.clone());
         d.profiles.push(p);
-        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false };
+        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false, wiresock: None };
         let built = build(&d, &opts).unwrap();
         check(&bin, &dir, &format!("proto-{i}-{}", name.replace(['/', ':'], "_")), &built.config);
     }
@@ -208,7 +208,7 @@ fn rules_presets_and_modes() {
         ..Default::default()
     });
     let names: Vec<String> = {
-        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false };
+        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false, wiresock: None };
         build(&d, &opts).unwrap().rule_sets.iter().map(|r| r.file_name.clone()).collect()
     };
     make_rule_sets(&bin, &dir, &names);
@@ -243,6 +243,7 @@ fn rules_presets_and_modes() {
             cache_file: Some(dir.join("cache.db")),
             extended_available: false,
             direct_dns_tls: false,
+            wiresock: None,
         };
         let built = build(&d2, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
         check(&bin, &dir, name, &built.config);
@@ -261,7 +262,7 @@ fn interface_profile_and_wg_conf() {
     );
     let wg = wgconf::parse(&conf, "AWG compatible").unwrap();
     let mut d = AppData::default();
-    d.profiles.push(Profile { id: "wg".into(), name: wg.profile.name, outbound: wg.profile.outbound, subscription: None, link: None, created_at: 0 });
+    d.profiles.push(Profile { id: "wg".into(), name: wg.profile.name, outbound: wg.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: None });
     d.profiles.push(Profile {
         id: "if".into(),
         name: "AmneziaVPN".into(),
@@ -269,6 +270,7 @@ fn interface_profile_and_wg_conf() {
         subscription: None,
         link: None,
         created_at: 0,
+        wiresock: None,
     });
     d.settings.active_profile = Some("wg".into());
     d.rules.push(Rule {
@@ -279,7 +281,7 @@ fn interface_profile_and_wg_conf() {
         route: Route::Profile { id: "if".into() },
         ..Default::default()
     });
-    let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false };
+    let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false, wiresock: None };
     check(&bin, &dir, "iface", &build(&d, &opts).unwrap().config);
 }
 
@@ -317,11 +319,11 @@ fn amneziawg_and_xhttp_need_sing_box_lx() {
     let conf = "[Interface]\nPrivateKey = OOrcz46udUCWEuue7YueYT6OGhchZ91v0NqtRu+W2FI=\nAddress = 10.8.1.2/32\nJc = 3\nJmin = 10\nJmax = 40\nS1 = 20\nS2 = 30\nS3 = 16\nS4 = 12\nHeaderProtectionKey = KIKOZNzj+d+G5Gw84nfLm49oM/f+xMoThA4AEOqyZkc=\nRandomTrailers = on\n\n[Peer]\nPublicKey = xqz8eGLSa0P5JHkSTGnKoczKZjmonaUDbbx8bUqRjWw=\nEndpoint = 203.0.113.7:39000\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 22-30\n";
     let awg = wgconf::parse(conf, "AWG 3.1").unwrap().profile;
     let mut d = AppData::default();
-    d.profiles.push(Profile { id: "awg".into(), name: awg.name, outbound: awg.outbound, subscription: None, link: None, created_at: 0 });
+    d.profiles.push(Profile { id: "awg".into(), name: awg.name, outbound: awg.outbound, subscription: None, link: None, created_at: 0, wiresock: None });
     d.profiles.push(profile("xh", "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&type=xhttp&path=%2Fxh&mode=auto&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#XHTTP"));
     d.settings.active_profile = Some("awg".into());
     d.rules.push(Rule { id: "r".into(), name: "curl".into(), enabled: true, apps: vec!["curl.exe".into()], route: Route::Profile { id: "xh".into() }, ..Default::default() });
-    let opts = |lx: bool| BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: lx, direct_dns_tls: false };
+    let opts = |lx: bool| BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: lx, direct_dns_tls: false, wiresock: None };
     for mode in [InboundMode::Tun, InboundMode::SystemProxy] {
         d.settings.mode = mode;
         let built = build(&d, &opts(true)).unwrap();
@@ -332,4 +334,33 @@ fn amneziawg_and_xhttp_need_sing_box_lx() {
     assert!(e.0.contains("«AWG 3.1» (AmneziaWG)") && e.0.contains("«XHTTP» (XHTTP)") && e.0.contains("sing-box-lx"), "{}", e.0);
     d.settings.core = retunl_core::awg::CorePref::Official;
     assert!(build(&d, &opts(true)).unwrap_err().0.contains("официальное ядро"));
+}
+
+#[test]
+fn wiresock_configs() {
+    let Some(bin) = sing_box() else {
+        eprintln!("sing-box not found, skipping");
+        return;
+    };
+    let dir = work_dir("wiresock");
+    let conf = format!(
+        "[Interface]\nPrivateKey = {WG_PRIV}\nAddress = 10.8.0.2/32\nJc = 3\nS1 = 15\nS2 = 20\nH1 = 11\nH2 = 12\nH3 = 13\nH4 = 14\nId = ozon.ru\nIp = QUIC\n\n[Peer]\nPublicKey = {WG_PUB}\nEndpoint = 192.0.2.10:51820\nAllowedIPs = 0.0.0.0/0\n"
+    );
+    let wg = wgconf::parse(&conf, "WS").unwrap();
+    let mut d = AppData::default();
+    d.profiles.push(Profile { id: "ws".into(), name: wg.profile.name, outbound: wg.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: wg.wiresock });
+    d.profiles.push(profile("nl", &format!("vless://id@nl.example.com:443?security=reality&pbk={REALITY_PBK}&sni=www.microsoft.com#NL")));
+    d.settings.active_profile = Some("ws".into());
+    d.rules.push(Rule { id: "r".into(), name: "Telegram".into(), enabled: true, apps: vec!["Telegram.exe".into()], route: Route::Profile { id: "nl".into() }, ..Default::default() });
+    let link = WireSockLink { profile_id: "ws".into(), port: free_port(), username: "u".into(), password: "p".into(), keep_out: vec!["192.0.2.10/32".into()] };
+    for (name, mode) in [("wiresock-tun", InboundMode::Tun), ("wiresock-proxy", InboundMode::SystemProxy)] {
+        d.settings.mode = mode;
+        let opts = BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: false, direct_dns_tls: false, wiresock: Some(link.clone()) };
+        let built = build(&d, &opts).unwrap();
+        check(&bin, &dir, name, &built.config);
+    }
+    // the helper itself, and its DNS through a DoH server by name
+    let mut s = Settings::default();
+    s.dns.remote = "https://dns.google/dns-query".into();
+    check(&bin, &dir, "wiresock-helper", &build_wiresock_helper(&s, &link, None).unwrap());
 }

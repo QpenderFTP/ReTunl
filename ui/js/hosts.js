@@ -62,6 +62,43 @@ function redraw() {
   if (store.page === 'hosts' && store.navigate) store.navigate('hosts', true);
 }
 
+// ---------- folding ----------
+
+// What is folded: 'sv:<server>' hides a server's protocols, 'proto:<server>:<container>' a client list.
+const FOLD_KEY = 'hosts-folded';
+const folded = new Set((() => {
+  try { return JSON.parse(localStorage.getItem(FOLD_KEY) || '[]'); } catch { return []; }
+})());
+const svKey = (sv) => 'sv:' + sv.id;
+const protoKey = (sv, p) => 'proto:' + sv.id + ':' + p.container;
+
+/** `from`: the button that asked; it keeps the focus through the redraw. */
+function setFolded(keys, on, from) {
+  for (const k of keys) {
+    if (on) folded.add(k);
+    else folded.delete(k);
+  }
+  // servers that were forgotten leave their keys behind
+  if (list) {
+    const ids = new Set(list.map((sv) => sv.id));
+    for (const k of [...folded]) if (!ids.has(k.split(':')[1])) folded.delete(k);
+  }
+  try { localStorage.setItem(FOLD_KEY, JSON.stringify([...folded])); } catch { /* storage off */ }
+  redraw();
+  if (from) document.querySelector(`[data-fold="${CSS.escape(from)}"]`)?.focus();
+}
+
+function foldButton(key, what) {
+  const open = !folded.has(key);
+  return h('button.icon-btn.small.fold' + (open ? '.open' : ''), {
+    'aria-expanded': String(open), 'aria-label': (open ? 'Свернуть ' : 'Развернуть ') + what,
+    title: open ? 'Свернуть' : 'Развернуть', data: { fold: key },
+    onclick: () => setFolded([key], open, key),
+  }, icon('chevron'));
+}
+
+const clientCount = (p) => (p.clients ? p.clients.length : 0);
+
 function put(view) {
   if (!list) list = [];
   const i = list.findIndex((x) => x.id === view.id);
@@ -109,7 +146,15 @@ export const myServers = {
   count: () => (list && list.length) || '',
   render(root) {
     const has = list && list.length > 0;
+    const allFolded = has && list.every((sv) => folded.has(svKey(sv)));
     root.append(pageHead('Мои серверы', [
+      has && (allFolded
+        ? h('button.btn', {
+          data: { fold: 'all' },
+          // every list opens, the client lists too
+          onclick: () => setFolded(list.flatMap((sv) => [svKey(sv), ...(sv.scan ? sv.scan.protocols.map((p) => protoKey(sv, p)) : [])]), false, 'all'),
+        }, 'Развернуть все')
+        : h('button.btn', { data: { fold: 'all' }, onclick: () => setFolded(list.map(svKey), true, 'all') }, 'Свернуть все')),
       has && h('button.btn', { onclick: scanAll }, icon('refresh'), 'Проверить все'),
       h('button.btn.primary', { onclick: () => addDialog() }, icon('plus'), 'Добавить сервер'),
     ], has ? 'ReTunl заходит на сервер по SSH и управляет протоколами, которые поставил AmneziaVPN или он сам. Изменения сразу видны и в AmneziaVPN.' : null));
@@ -153,9 +198,18 @@ function serverCard(sv) {
   const inst = installs.get(sv.id);
   const addr = sv.user + '@' + sv.host + (sv.port !== 22 ? ':' + sv.port : '');
   const body = [];
+  const shut = folded.has(svKey(sv));
+  // errors and a running install stay in sight on a folded server
   if (inst) body.push(installBanner(sv, inst));
   if (sv.error && !checking) body.push(errorBanner(sv));
-  if (sc) {
+  let summary = null;
+  if (shut) {
+    if (sc && sc.protocols.length) {
+      const clients = sc.protocols.reduce((n, p) => n + clientCount(p), 0);
+      summary = plural(sc.protocols.length, 'протокол', 'протокола', 'протоколов')
+        + (clients ? ', ' + plural(clients, 'клиент', 'клиента', 'клиентов') : '');
+    } else if (sc) summary = 'протоколов нет';
+  } else if (sc) {
     if (sc.protocols.length) body.push(h('div.protos', sc.protocols.map((p) => protoBlock(sv, p))));
     else {
       body.push(h('div.panel.host-empty',
@@ -165,12 +219,14 @@ function serverCard(sv) {
   } else if (!sv.error || checking) {
     body.push(h('div.panel.host-empty', h('p.muted', checking ? 'Подключаюсь к серверу…' : 'Сервер ещё не проверяли.')));
   }
-  return h('section.group.host',
+  return h('section.group.host' + (shut ? '.folded' : ''),
     h('div.group-head',
+      foldButton(svKey(sv), 'сервер «' + sv.name + '»'),
       h('div.group-info',
         h('h2.group-title', sv.name),
         h('div.group-meta',
           h('span.selectable', addr),
+          summary && h('span.fold-sum', summary),
           sc && sc.os && h('span', sc.os),
           checking ? h('span', 'проверяю…') : sc ? h('span', 'проверен ' + fmtAgo(sc.at)) : null)),
       h('div.group-actions',
@@ -225,8 +281,13 @@ function protoBlock(sv, p) {
   else if (!p.clients) clients = h('div.list-empty', running ? 'Не удалось прочитать список клиентов.' : 'Контейнер остановлен, клиентов не видно.');
   else if (!p.clients.length) clients = h('div.list-empty', 'Клиентов пока нет.');
   else clients = p.clients.map((c) => clientRow(sv, p, c, stats));
-  return h('div.panel.proto',
+  const shut = folded.has(protoKey(sv, p));
+  if (shut && managed && p.clients) {
+    where.push(p.clients.length ? plural(p.clients.length, 'клиент', 'клиента', 'клиентов') : 'клиентов нет');
+  }
+  return h('div.panel.proto' + (shut ? '.folded' : ''),
     h('div.proto-head',
+      foldButton(protoKey(sv, p), 'клиентов ' + p.title),
       h('div.proto-info',
         h('h3.proto-title', p.title, !running && h('span.tag.warn', STATE[p.state] || p.state)),
         where.length > 0 && h('div.proto-meta', where.map((w) => h('span', w))),
@@ -244,7 +305,7 @@ function protoBlock(sv, p) {
             { label: 'Удалить протокол', icon: 'trash', danger: true, run: () => removeProto(sv, p) },
           ]),
         }, icon('more', 'dots')))),
-    h('div.list.cl-list', clients));
+    !shut && h('div.list.cl-list', clients));
 }
 
 /** A long multi-line error as one short line. */

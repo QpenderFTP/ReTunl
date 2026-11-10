@@ -477,6 +477,45 @@ ul.plain { margin: 4px 0 0; padding-left: 18px; }
 .speed-meta { display: flex; flex-direction: column; gap: 1px; max-width: 100%; font-size: 12.5px; color: var(--ink-3); }
 .speed-step { color: var(--ink-2); }
 .speed-error { color: var(--block-ink); }
+/* what the next run uses; a row opens the speed settings */
+.speed-setup { display: flex; flex-direction: column; margin: 0 -8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.speed-opt {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 4px 0 8px;
+  border: 0; border-radius: 8px; background: transparent; color: var(--ink); font: 13px/1.3 var(--text); text-align: left; cursor: pointer;
+}
+.speed-opt:hover:not(:disabled) { background: var(--hover); }
+.speed-opt:disabled { cursor: default; opacity: .6; }
+.speed-opt-label { flex: none; color: var(--ink-3); }
+.speed-opt-value { flex: 1; min-width: 0; text-align: right; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.speed-opt .ic { flex: none; width: 14px; height: 14px; color: var(--ink-3); transform: rotate(-90deg); }
+
+.speed-form { gap: 20px; padding-top: 6px; }
+.speed-form .seg { align-self: flex-start; }
+.speed-pick {
+  display: flex; flex-direction: column; gap: 12px; max-height: 292px; overflow-y: auto; padding: 10px 6px 10px 14px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--raised);
+}
+.speed-pick[hidden] { display: none; }
+
+.ws-form { gap: 18px; padding-top: 4px; }
+.ws-on { display: flex; align-items: center; gap: 16px; cursor: pointer; }
+.ws-on-text { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.ws-opts { gap: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.ws-opts .seg { align-self: flex-start; }
+.ws-mask { flex-wrap: wrap; }
+.ws-mask > .field:first-child { flex: 1 1 220px; }
+.ws-mask > .field:last-child { width: 190px; }
+.ws-junk { flex-wrap: wrap; gap: 12px 16px; }
+.ws-junk .num-input { width: 84px; }
+.ws-junk-size { display: flex; align-items: center; gap: 8px; color: var(--ink-3); }
+.speed-group { display: flex; flex-direction: column; }
+.speed-group-title { margin-bottom: 2px; font: 600 12.5px/1.3 var(--sign); color: var(--ink-3); }
+.speed-target { display: flex; align-items: center; gap: 9px; min-height: 30px; font-size: 14px; cursor: pointer; }
+.speed-target-name { flex: none; max-width: 50%; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.speed-target-place { flex: 1; min-width: 0; font-size: 13px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.speed-own-row { display: flex; gap: 8px; }
+.speed-own-row .input:first-child { flex: none; width: 150px; }
+.speed-own-row .grow { flex: 1; min-width: 0; }
 
 /* Blocked: the no-entry sign, the counts, and who was stopped most. */
 .no-entry { width: 20px; height: 20px; flex: none; }
@@ -794,6 +833,14 @@ col.c7 { width: 68px; }
 .proto-meta span:first-child { color: var(--ink-2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .proto-problem { margin-top: 4px; font-size: 13px; color: var(--warn-ink); }
 .cl-list { border-top: 1px solid var(--line); }
+/* the arrow that folds a server or a client list */
+.fold .ic { transition: transform .15s ease; }
+.fold:not(.open) .ic { transform: rotate(-90deg); }
+.group-head > .fold { align-self: flex-start; margin: -1px -8px 0 -4px; }
+.proto-head > .fold { margin: 0 -6px 0 -8px; }
+.host.folded { margin-bottom: 16px; }
+.host.folded > .group-head:last-child { margin-bottom: 0; }
+.fold-sum { color: var(--ink-2); font-weight: 600; }
 .cl-row { display: flex; align-items: center; gap: 16px; min-height: 50px; padding: 0 10px 0 16px; }
 .cl-row:hover { background: var(--hover); }
 .cl-row.pending { opacity: .5; }
@@ -1040,6 +1087,9 @@ html.scanning .app, html.scanning .toasts { visibility: hidden; }
   .srv-row .srv-test { display: none; }
   .lat { min-width: 0; }
   .group-head { flex-wrap: wrap; }
+  /* a protocol's buttons shrink to their icons: the title needs the room */
+  .proto-head { gap: 8px; }
+  .proto-head .btn.small { width: 38px; padding: 0; gap: 0; justify-content: center; font-size: 0; }
 
   /* rules: the route under the name; reordering is «Выше»/«Ниже» in the row menu */
   .rule-row {

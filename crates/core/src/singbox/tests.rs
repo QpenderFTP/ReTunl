@@ -6,11 +6,11 @@ use crate::awg::CoreKind;
 
 fn profile(id: &str, link: &str) -> Profile {
     let p = parse_link(link).unwrap();
-    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: Some(link.into()), created_at: 0 }
+    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: Some(link.into()), created_at: 0, wiresock: None }
 }
 
 fn opts() -> BuildOptions {
-    BuildOptions { ruleset_dir: PathBuf::from("C:\\rs"), controller_secret: "s3cret".into(), cache_file: None, extended_available: false, direct_dns_tls: false }
+    BuildOptions { ruleset_dir: PathBuf::from("C:\\rs"), controller_secret: "s3cret".into(), cache_file: None, extended_available: false, direct_dns_tls: false, wiresock: None }
 }
 
 fn base() -> AppData {
@@ -309,4 +309,115 @@ fn android_config() {
 
     assert!(is_package_name("org.telegram.messenger") && is_package_name("com.a_b.c9"));
     assert!(!is_package_name("Telegram.exe.") && !is_package_name("telegram") && !is_package_name("1a.b") && !is_package_name(r"C:\x.exe"));
+}
+
+fn wiresock_data() -> AppData {
+    let mut d = base();
+    let mut wg = profile("wg", "wireguard://cHJpdg%3D%3D@wg.example.com:51820?publickey=cHVi&address=10.0.0.2#WG");
+    // AmneziaWG headers would want sing-box-lx, but WireSock runs this server itself
+    wg.outbound["s1"] = json!(15);
+    wg.outbound["h1"] = json!(11);
+    wg.wiresock = Some(WireSock { enabled: true, ..WireSock::default() });
+    d.profiles.push(wg);
+    d
+}
+
+fn link() -> WireSockLink {
+    WireSockLink { profile_id: "wg".into(), port: 23998, username: "u".into(), password: "p".into(), keep_out: vec!["192.0.2.10/32".into()] }
+}
+
+#[test]
+fn wiresock_server_is_the_one_a_route_uses() {
+    let mut d = wiresock_data();
+    // nothing goes to it yet
+    assert!(wiresock_profile(&d).is_none());
+    let mut games = rule("Игры", Route::Profile { id: "wg".into() });
+    games.domains = vec!["steampowered.com".into()];
+    d.rules.push(games);
+    assert_eq!(wiresock_profile(&d).map(|p| p.id.as_str()), Some("wg"));
+    // switched off: none
+    d.profiles[2].wiresock.as_mut().unwrap().enabled = false;
+    assert!(wiresock_profile(&d).is_none());
+    // a disabled rule does not count
+    d.profiles[2].wiresock.as_mut().unwrap().enabled = true;
+    d.rules[0].enabled = false;
+    assert!(wiresock_profile(&d).is_none());
+    // the selected server, through «через VPN»
+    d.settings.active_profile = Some("wg".into());
+    assert_eq!(wiresock_profile(&d).map(|p| p.id.as_str()), Some("wg"));
+}
+
+#[test]
+fn wiresock_server_becomes_a_socks_outbound() {
+    let mut d = wiresock_data();
+    d.settings.active_profile = Some("wg".into());
+    let mut fi = rule("Финляндия", Route::Profile { id: "p2".into() });
+    fi.domains = vec!["yle.fi".into()];
+    d.rules.push(fi);
+    let o = BuildOptions { wiresock: Some(link()), ..opts() };
+    let b = build_for(&d, &o, Os::Windows).unwrap();
+    let c = &b.config;
+    assert!(c.get("endpoints").is_none(), "{c}");
+    let ws = c["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "WG").expect("WG outbound");
+    assert_eq!(ws, &json!({"type": "socks", "tag": "WG", "server": "127.0.0.1", "server_port": 23998, "version": "5", "username": "u", "password": "p"}));
+    assert_eq!(b.tags["WG"], "wg");
+    // the official core is enough: WireSock does the AmneziaWG part
+    assert_eq!(b.core, CoreKind::Official);
+    // WireSock's packets stay off the tunnel, the helper never leaks past WireSock
+    let rules = c["route"]["rules"].as_array().unwrap();
+    assert!(rules.contains(&json!({"process_name": ["wiresock-client.exe"], "action": "route", "outbound": "direct"})));
+    assert!(rules.contains(&json!({"process_name": ["retunl-wiresock-out.exe"], "action": "reject"})));
+    assert_eq!(c["inbounds"][0]["route_exclude_address"], json!(["192.0.2.10/32"]));
+    assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+
+    // system proxy: no virtual adapter, no process rules
+    d.settings.mode = InboundMode::SystemProxy;
+    let c = build_for(&d, &o, Os::Windows).unwrap().config;
+    assert!(c["route"]["rules"].as_array().unwrap().iter().all(|r| r.get("process_name").is_none()));
+}
+
+#[test]
+fn wiresock_elsewhere_is_plain_wireguard() {
+    let mut d = wiresock_data();
+    d.settings.active_profile = Some("wg".into());
+    let b = build_for(&d, &BuildOptions { extended_available: true, ..opts() }, Os::MacOs).unwrap();
+    assert_eq!(b.config["endpoints"][0]["tag"], "WG");
+    assert!(b.warnings.iter().any(|w| w.contains("только в Windows")), "{:?}", b.warnings);
+
+    // a second WireSock server goes as plain WireGuard, with a word about it
+    let mut second = d.profiles[2].clone();
+    second.id = "wg2".into();
+    second.name = "WG2".into();
+    d.profiles.push(second);
+    let mut second = rule("Второй", Route::Profile { id: "wg2".into() });
+    second.domains = vec!["example.org".into()];
+    d.rules.push(second);
+    let b = build_for(&d, &BuildOptions { wiresock: Some(link()), extended_available: true, ..opts() }, Os::Windows).unwrap();
+    assert_eq!(b.config["endpoints"][0]["tag"], "WG2");
+    assert!(b.warnings.iter().any(|w| w.contains("один сервер за раз") && w.contains("WG2")), "{:?}", b.warnings);
+}
+
+#[test]
+fn wiresock_helper_config() {
+    let mut s = Settings::default();
+    s.dns.remote = "https://dns.google/dns-query".into();
+    let c = build_wiresock_helper(&s, &link(), Some("Ethernet")).unwrap();
+    assert_eq!(c["inbounds"][0]["listen_port"], 23998);
+    assert_eq!(c["inbounds"][0]["users"], json!([{"username": "u", "password": "p"}]));
+    assert_eq!(c["route"]["default_interface"], "Ethernet");
+    assert!(c["route"].get("auto_detect_interface").is_none());
+    // a DoH server by name needs a plain resolver to find it
+    assert_eq!(c["dns"]["servers"].as_array().unwrap().len(), 2);
+    let c = build_wiresock_helper(&Settings::default(), &link(), None).unwrap();
+    assert_eq!(c["route"]["auto_detect_interface"], true);
+    // plain DNS under strict route: the same resolver over TLS
+    let mut s = Settings::default();
+    s.dns.remote = "1.1.1.1".into();
+    s.mode = InboundMode::Tun;
+    s.tun.strict_route = true;
+    let c = build_wiresock_helper(&s, &link(), None).unwrap();
+    assert_eq!(c["dns"]["servers"][0]["type"], "tls", "{}", c["dns"]);
+    s.tun.strict_route = false;
+    let c = build_wiresock_helper(&s, &link(), None).unwrap();
+    assert_eq!(c["dns"]["servers"][0]["type"], "udp", "{}", c["dns"]);
 }

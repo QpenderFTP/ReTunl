@@ -32,6 +32,100 @@ pub struct BuildOptions {
     /// tunnel, and on some PCs that catches sing-box's own queries too. The
     /// engine sets it after checking that the resolver answers on 853.
     pub direct_dns_tls: bool,
+    /// Windows: the server that goes through WireSock ([`wiresock_profile`]).
+    pub wiresock: Option<WireSockLink>,
+}
+
+/// Program name of the second sing-box that WireSock tunnels (a copy of the core).
+pub const WIRESOCK_HELPER: &str = "retunl-wiresock-out";
+
+/// How the main core reaches a WireGuard server that WireSock runs:
+///
+/// ```text
+/// programs → sing-box (rules) → SOCKS 127.0.0.1:port → helper → WireSock → server
+/// ```
+///
+/// WireSock tunnels only the helper ([`WIRESOCK_HELPER`]), a sing-box that
+/// sends everything straight out through the network adapter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WireSockLink {
+    pub profile_id: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    /// The server's addresses (CIDR): kept out of the virtual adapter, so
+    /// WireSock keeps sending to them through the network adapter.
+    pub keep_out: Vec<String>,
+}
+
+impl WireSockLink {
+    /// The SOCKS outbound that stands in for the server.
+    pub fn outbound(&self, tag: &str) -> Value {
+        json!({
+            "type": "socks",
+            "tag": tag,
+            "server": "127.0.0.1",
+            "server_port": self.port,
+            "version": "5",
+            "username": self.username,
+            "password": self.password,
+        })
+    }
+}
+
+/// The server that goes through WireSock: one switched to it that some route
+/// uses, the selected server first. WireSock runs one tunnel at a time.
+pub fn wiresock_profile(data: &AppData) -> Option<&Profile> {
+    let mut ids: Vec<&str> = Vec::new();
+    let routes = std::iter::once(&data.settings.final_route)
+        .chain(data.rules.iter().filter(|r| r.enabled && !r.is_empty()).map(|r| &r.route));
+    for route in routes {
+        match route {
+            Route::Proxy => ids.extend(data.settings.active_profile.as_deref()),
+            Route::Profile { id } => ids.push(id),
+            Route::Direct | Route::Block => {}
+        }
+    }
+    let used = |p: &&Profile| p.uses_wiresock() && ids.contains(&p.id.as_str());
+    data.active_profile().filter(used).or_else(|| data.profiles.iter().find(used))
+}
+
+/// Config of the helper sing-box: a local proxy (SOCKS for the main core,
+/// HTTP for ReTunl's own check) that sends everything straight out. `iface`
+/// binds it to the network adapter: WireSock catches packets there, and
+/// ReTunl's own virtual adapter must not get them. Its DNS is «DNS через
+/// VPN»: the queries go through WireSock too.
+pub fn build_wiresock_helper(settings: &Settings, link: &WireSockLink, iface: Option<&str>) -> Res<Value> {
+    // strict route closes port 53 outside the virtual adapter: the same resolver over TLS
+    let strict = settings.mode == InboundMode::Tun && settings.tun.strict_route;
+    let spec = match dns::dot_ip(&settings.dns.remote) {
+        Some(ip) if strict => format!("tls://{ip}"),
+        _ => settings.dns.remote.clone(),
+    };
+    let remote = dns::server(&spec, DNS_REMOTE, None, DNS_BOOTSTRAP)
+        .map_err(|e| BuildError(format!("DNS через VPN: {e}")))?;
+    let mut servers = vec![remote.clone()];
+    if remote.get("domain_resolver").is_some() {
+        servers.push(json!({"type": "udp", "tag": DNS_BOOTSTRAP, "server": BOOTSTRAP_SERVER}));
+    }
+    let mut route = json!({"final": TAG_DIRECT, "default_domain_resolver": DNS_REMOTE});
+    match iface.map(str::trim).filter(|i| !i.is_empty()) {
+        Some(i) => route["default_interface"] = json!(i),
+        None => route["auto_detect_interface"] = json!(true),
+    }
+    Ok(json!({
+        "log": {"level": "warn", "timestamp": true},
+        "dns": {"servers": servers, "final": DNS_REMOTE, "strategy": if settings.ipv6 { "prefer_ipv4" } else { "ipv4_only" }},
+        "inbounds": [{
+            "type": "mixed",
+            "tag": "proxy-in",
+            "listen": "127.0.0.1",
+            "listen_port": link.port,
+            "users": [{"username": link.username, "password": link.password}],
+        }],
+        "outbounds": [{"type": "direct", "tag": TAG_DIRECT}],
+        "route": route,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +716,14 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
     if s.sniff {
         rules.push(json!({"action": "sniff"}));
     }
+    let wiresock = opts.wiresock.as_ref().filter(|_| os == Os::Windows);
+    if wiresock.is_some() && mode == InboundMode::Tun {
+        // WireSock's own packets go straight out. The helper is bound to the
+        // network adapter and never reaches the tunnel; if it did, its traffic
+        // would skip WireSock, so it is dropped rather than let out
+        rules.push(json!({"process_name": ["wiresock-client.exe"], "action": "route", "outbound": TAG_DIRECT}));
+        rules.push(json!({"process_name": [format!("{WIRESOCK_HELPER}.exe")], "action": "reject"}));
+    }
     if mode == InboundMode::Tun {
         rules.push(json!({"protocol": "dns", "action": "hijack-dns"}));
     }
@@ -705,8 +807,23 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
         .filter_map(|p| ctx.tag_of.get(&p.id).map(|t| (p, t.clone())))
         .collect();
     used.sort_by(|a, b| a.1.cmp(&b.1));
-    let core = choose_core(s.core, used.iter().map(|(p, _)| *p), opts.extended_available)?;
+    let via_wiresock = |p: &Profile| wiresock.is_some_and(|w| w.profile_id == p.id);
+    // WireSock runs its server itself: it asks nothing of the core
+    let core = choose_core(s.core, used.iter().map(|(p, _)| *p).filter(|p| !via_wiresock(p)), opts.extended_available)?;
     for (p, tag) in used {
+        if let Some(w) = wiresock.filter(|_| via_wiresock(p)) {
+            outbounds.push(w.outbound(&tag));
+            tags.insert(tag.clone(), p.id.clone());
+            continue;
+        }
+        if p.uses_wiresock() && os != Os::Windows {
+            ctx.warnings.push(format!("WireSock есть только в Windows: «{}» подключается обычным WireGuard.", p.name));
+        } else if p.uses_wiresock() && wiresock.is_some() {
+            ctx.warnings.push(format!(
+                "Через WireSock работает один сервер за раз: «{}» подключается обычным WireGuard.",
+                p.name
+            ));
+        }
         let mut ob = p
             .outbound
             .as_object()
@@ -751,6 +868,9 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
                 "strict_route": s.tun.strict_route,
                 "stack": stack,
             });
+            if let Some(w) = wiresock.filter(|w| !w.keep_out.is_empty()) {
+                tun["route_exclude_address"] = json!(w.keep_out);
+            }
             // macOS names tunnels itself (utunN)
             if os == Os::Windows {
                 let name = if s.tun.interface_name.trim().is_empty() { "ReTunl" } else { s.tun.interface_name.trim() };

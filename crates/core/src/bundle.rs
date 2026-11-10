@@ -336,6 +336,7 @@ mod tests {
             subscription: None,
             link: None,
             created_at: 0,
+            wiresock: None,
         };
         src.profiles.push(manual);
         let nl = src.profiles[0].id.clone();
@@ -403,6 +404,7 @@ mod tests {
                     subscription: Some("s1".into()),
                     link: None,
                     created_at: 0,
+                    wiresock: None,
                 }],
             }],
             ..Default::default()

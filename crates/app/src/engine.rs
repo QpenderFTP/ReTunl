@@ -19,6 +19,7 @@ use crate::clash::Clash;
 use crate::fetch;
 use crate::paths::Paths;
 use crate::sys;
+use crate::wiresock;
 
 /// Error text meaning "TUN needs admin rights" — the UI offers a restart.
 pub const NEED_ADMIN: &str = "need_admin";
@@ -127,6 +128,10 @@ struct Inner {
     last_sample: Option<(Instant, u64, u64)>,
     /// Why the last connection ended, when the core said so itself.
     end_error: Option<String>,
+    /// WireSock and its helper, when a server goes through them.
+    wiresock: Option<wiresock::Tunnel>,
+    /// WireSock stopped on its own: the connection ends with this.
+    wiresock_error: Option<String>,
 }
 
 type Listener = Box<dyn Fn(Status) + Send + Sync>;
@@ -165,6 +170,8 @@ impl Engine {
                 stopping: false,
                 last_sample: None,
                 end_error: None,
+                wiresock: None,
+                wiresock_error: None,
             }),
             logs: Mutex::new((VecDeque::with_capacity(LOG_CAPACITY), 1)),
             tail: Mutex::new(None),
@@ -179,6 +186,11 @@ impl Engine {
 
     pub fn job(&self) -> Option<&sys::Job> {
         self.job.as_ref()
+    }
+
+    /// The running WireSock tunnel's proxy: tests of its server go through it.
+    pub fn wiresock_link(&self) -> Option<singbox::WireSockLink> {
+        self.lock().wiresock.as_ref().map(|t| t.link.clone())
     }
 
     pub fn set_listener(&self, f: Listener) {
@@ -396,6 +408,14 @@ impl Engine {
             ));
         }
         let direct_dns_tls = self.direct_dns_tls(&data).await;
+        // WireSock is checked before the config: the config points at its helper
+        let wiresock_plan = match singbox::wiresock_profile(&data).filter(|_| cfg!(windows)) {
+            Some(p) => {
+                self.set_step("Готовлю WireSock…");
+                Some(wiresock::plan(p, elevated).await?)
+            }
+            None => None,
+        };
         let secret = uuid::Uuid::new_v4().simple().to_string();
         let built = singbox::build(
             &data,
@@ -405,6 +425,7 @@ impl Engine {
                 cache_file: Some(paths.run_dir().join("cache.db")),
                 extended_available: paths.find_lx_core().is_some(),
                 direct_dns_tls,
+                wiresock: wiresock_plan.as_ref().map(|p| p.link.clone()),
             },
         )
         .map_err(|e| e.0)?;
@@ -460,6 +481,18 @@ impl Engine {
                 .await
                 .map_err(|e| e.to_string())?
                 .map_err(|line| format!("sing-box не принял конфигурацию: {}", humanize(&line)))?;
+        }
+
+        // WireSock first: it picks the network adapter before ReTunl's own is up
+        if let Some(plan) = wiresock_plan {
+            self.set_step("Запускаю WireSock…");
+            let me = self.clone();
+            let log: wiresock::Log = Arc::new(move |level: &str, text: &str| me.log_app(level, text));
+            let mut tunnel = wiresock::start(plan, &core, &paths.run_dir(), &data.settings, self.job.as_ref(), log).await?;
+            warnings.extend(tunnel.warning.take());
+            let mut g = self.lock();
+            g.wiresock = Some(tunnel);
+            g.wiresock_error = None;
         }
 
         let tun = mode == InboundMode::Tun;
@@ -625,13 +658,27 @@ impl Engine {
                 Some(c) => c.try_wait().ok().flatten(),
                 None => return,
             };
-            let Some(code) = exited else { continue };
+            let Some(code) = exited else {
+                // without WireSock its server is gone: end the connection
+                if let Some(why) = g.wiresock.as_mut().and_then(|t| t.exited()) {
+                    g.wiresock_error = Some(why);
+                    g.wiresock = None;
+                    if let Some(c) = g.child.as_mut() {
+                        let _ = c.kill();
+                    }
+                }
+                continue;
+            };
             let session = g.session.take().expect("session");
             g.child = None;
             g.stop = None;
+            let tunnel = g.wiresock.take();
+            let wiresock_error = g.wiresock_error.take();
             // Android: «Отключить» in the notification is a normal stop too
-            let stopping = g.stopping || exit_clean(&code);
+            let stopping = (g.stopping || exit_clean(&code)) && wiresock_error.is_none();
             drop(g);
+            // stops WireSock and its helper
+            drop(tunnel);
             // the last lines explain why it ended
             self.drain_tail();
             self.blocks.end();
@@ -642,7 +689,8 @@ impl Engine {
                 self.log_app("INFO", "Отключено");
                 self.set_status(Status::new(Phase::Stopped));
             } else {
-                let msg = exit_error(&code)
+                let msg = wiresock_error
+                    .or_else(|| exit_error(&code))
                     .or_else(|| self.last_error())
                     .unwrap_or_else(|| format!("sing-box неожиданно завершился ({code})."));
                 self.log_app("ERROR", &format!("Соединение прервано: {msg}"));
@@ -656,14 +704,19 @@ impl Engine {
     }
 
     fn kill_current(&self) {
-        let mut g = self.lock();
-        g.stopping = true;
-        let g = &mut *g;
-        if let (Some(c), Some(stop)) = (g.child.as_mut(), g.stop.as_ref()) {
-            sys::force_stop(stop, c);
-        } else if let Some(c) = g.child.as_mut() {
-            let _ = c.kill();
-        }
+        let tunnel = {
+            let mut g = self.lock();
+            g.stopping = true;
+            let g = &mut *g;
+            if let (Some(c), Some(stop)) = (g.child.as_mut(), g.stop.as_ref()) {
+                sys::force_stop(stop, c);
+            } else if let Some(c) = g.child.as_mut() {
+                let _ = c.kill();
+            }
+            g.wiresock.take()
+        };
+        // stops WireSock and its helper
+        drop(tunnel);
     }
 
     pub async fn stop(self: &Arc<Self>) {
@@ -726,6 +779,9 @@ impl Engine {
                 sys::clear_system_proxy_if(session.mixed_port);
             }
         }
+        // the watcher may not have got to it before the app exits
+        let tunnel = self.lock().wiresock.take();
+        drop(tunnel);
         self.blocks.save();
     }
 
@@ -1114,6 +1170,157 @@ mod tests {
         assert!(!lines.iter().any(|l| l.level == "DEBUG"), "debug lines leaked into the log");
         // the total is saved when the connection ends
         assert_eq!(Engine::new(Some(stats)).blocks.stats().total, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// WireSock for real, in proxy mode. `RETUNL_WS_CONF`: a WireGuard `.conf`
+    /// (masking in `#@ws:` lines), `RETUNL_WS_IP`: the address its server goes
+    /// out from, `RETUNL_WS_LOG`: where the report goes (the Ctrl+Break sent
+    /// to WireSock takes this process's console, and its output with it).
+    /// Needs WireSock VPN Client and a prompt run as administrator:
+    ///
+    /// ```text
+    /// cargo test -p retunl wiresock_live -- --ignored --nocapture
+    /// ```
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn wiresock_live() {
+        wiresock_live_in(false).await;
+    }
+
+    /// The same with the virtual adapter: curl.exe goes to the server by a
+    /// rule, the rest of the computer straight out.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn wiresock_live_tun() {
+        wiresock_live_in(true).await;
+    }
+
+    #[cfg(windows)]
+    async fn wiresock_live_in(tun: bool) {
+        let report = std::env::var("RETUNL_WS_LOG").expect("RETUNL_WS_LOG");
+        let say = {
+            let report = report.clone();
+            move |text: &str| {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&report) {
+                    let _ = writeln!(f, "{text}");
+                }
+            }
+        };
+        let said = say.clone();
+        std::panic::set_hook(Box::new(move |info| said(&format!("FAILED: {info}"))));
+        let conf = std::fs::read_to_string(std::env::var("RETUNL_WS_CONF").expect("RETUNL_WS_CONF")).unwrap();
+        let want_ip = std::env::var("RETUNL_WS_IP").expect("RETUNL_WS_IP");
+        let core = test_core().expect("sing-box");
+        assert!(sys::is_elevated(), "run it as administrator");
+        std::env::set_var("RETUNL_NO_SYSTEM_PROXY", "1");
+        let dir = std::env::temp_dir().join(format!("retunl-wiresock-{}", uuid::Uuid::new_v4().simple()));
+        let paths = Paths { exe_dir: dir.clone(), data_dir: dir.join("data"), local_dir: dir.join("local"), portable: false };
+        for d in [paths.data_dir.clone(), paths.core_dir(), paths.ruleset_dir(), paths.run_dir()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::copy(&core, paths.core_dir().join(crate::paths::CORE_EXE)).unwrap();
+
+        let wg = retunl_core::wgconf::parse(&conf, "WireSock").unwrap();
+        let ws = retunl_core::WireSock { enabled: true, ..wg.wiresock.unwrap_or_default() };
+        say(&format!("masking: {ws:?}"));
+        let mut data = AppData::default();
+        data.profiles.push(retunl_core::Profile {
+            id: "ws".into(),
+            name: wg.profile.name,
+            outbound: wg.profile.outbound,
+            subscription: None,
+            link: None,
+            created_at: 0,
+            wiresock: Some(ws),
+        });
+        data.settings.active_profile = Some("ws".into());
+        if tun {
+            data.settings.mode = InboundMode::Tun;
+            data.settings.final_route = Route::Direct;
+            data.rules.push(retunl_core::Rule {
+                id: "curl".into(),
+                name: "curl".into(),
+                enabled: true,
+                apps: vec!["curl.exe".into()],
+                route: Route::Profile { id: "ws".into() },
+                ..Default::default()
+            });
+        } else {
+            data.settings.mode = InboundMode::SystemProxy;
+            data.settings.final_route = Route::Proxy;
+        }
+        data.settings.mixed_port = pick_port(0);
+        data.settings.controller_port = pick_port(0);
+        let port = data.settings.mixed_port;
+
+        let engine = Arc::new(Engine::new(None));
+        let req = StartRequest { data: data.clone(), paths: paths.clone(), http: crate::fetch::http_client(), elevated: true };
+        let started = engine.start(req).await;
+        let print_log = |from: u64| {
+            let (lines, _) = engine.logs_after(from);
+            for l in &lines {
+                say(&format!("  [{} {}] {}", l.source, l.level, l.text));
+            }
+            lines.last().map_or(from, |l| l.seq)
+        };
+        let seen = print_log(0);
+        started.expect("connect");
+        let warnings = engine.status().warnings;
+        say(&format!("warnings: {warnings:?}"));
+        assert!(warnings.is_empty());
+        let link = engine.wiresock_link().expect("WireSock is up");
+        let running = |name: &str| sys::processes().iter().any(|p| p.name.eq_ignore_ascii_case(name));
+        assert!(running("wiresock-client.exe") && running("retunl-wiresock-out.exe"));
+
+        if tun {
+            // curl.exe goes to the server by its rule, this test straight out
+            let out = std::process::Command::new("curl.exe").args(["-s", "--max-time", "15", "https://api.ipify.org"]).output().unwrap();
+            let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            say(&format!("curl.exe goes out from {ip}"));
+            assert_eq!(ip, want_ip);
+            let direct = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(15)).build().unwrap();
+            let ip = direct.get("https://api.ipify.org").send().await.unwrap().text().await.unwrap();
+            say(&format!("the rest goes out from {ip}"));
+            assert_ne!(ip.trim(), want_ip);
+        } else {
+            // the proxy goes out from the server
+            let http = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).unwrap())
+                .timeout(Duration::from_secs(15))
+                .build()
+                .unwrap();
+            let ip = http.get("https://api.ipify.org").send().await.unwrap().text().await.unwrap();
+            say(&format!("goes out from {ip}"));
+            assert_eq!(ip.trim(), want_ip);
+        }
+
+        // latency and speed of the server go through WireSock too
+        let through = crate::wiresock::through_tunnel(data.profiles[0].clone(), Some(&link));
+        let lat = crate::probe::measure(&paths, &data.settings, vec![through.clone()], engine.job()).await.unwrap();
+        say(&format!("latency: {:?}", lat["ws"]));
+        assert!(lat["ws"].ms.is_some(), "{:?}", lat["ws"]);
+        let speed = crate::speed::run(&paths, &data.settings, Some(through), engine.job(), |_| {}).await.unwrap();
+        say(&format!("speed: direct {:?}; vpn {:?}", speed.direct, speed.vpn));
+        assert!(speed.vpn.as_ref().is_some_and(|v| v.mbps.is_some()), "{:?}", speed.vpn);
+
+        engine.stop().await;
+        let until = Instant::now() + Duration::from_secs(10);
+        while engine.status().phase != Phase::Stopped && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        print_log(seen);
+        assert_eq!(engine.status().phase, Phase::Stopped);
+        // WireSock and the helper end with the connection
+        let until = Instant::now() + Duration::from_secs(5);
+        while (running("wiresock-client.exe") || running("retunl-wiresock-out.exe")) && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(!running("wiresock-client.exe"), "WireSock is still running");
+        assert!(!running("retunl-wiresock-out.exe"), "the helper is still running");
+        say("PASSED");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

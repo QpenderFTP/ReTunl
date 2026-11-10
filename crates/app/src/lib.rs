@@ -22,6 +22,7 @@ mod store;
 mod sys;
 #[cfg(desktop)]
 mod tray;
+mod wiresock;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -237,6 +238,7 @@ pub fn run() {
             api::delete_subscription,
             api::set_active,
             api::rename_profile,
+            api::set_wiresock,
             api::set_profile_json,
             api::delete_profiles,
             api::add_interface,

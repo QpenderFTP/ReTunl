@@ -126,6 +126,7 @@ pub fn add_profiles(data: &mut AppData, items: Vec<ParsedLink>, subscription: Op
             subscription: subscription.map(str::to_string),
             link: links.get(i).cloned().flatten(),
             created_at: now_unix(),
+            wiresock: None,
         });
         added.push(id);
     }
@@ -154,15 +155,15 @@ pub fn merge_subscription(data: &mut AppData, sub_id: &str, items: Vec<ParsedLin
             .iter()
             .find(|p| !used.contains(&p.id) && p.name == item.name)
             .or_else(|| old.iter().find(|p| !used.contains(&p.id) && key(&p.outbound) == key(&item.outbound)));
-        let (id, created) = match found {
+        let (id, created, wiresock) = match found {
             Some(p) => {
                 used.insert(p.id.clone());
                 kept += 1;
-                (p.id.clone(), p.created_at)
+                (p.id.clone(), p.created_at, p.wiresock.clone())
             }
             None => {
                 added += 1;
-                (new_id(), now_unix())
+                (new_id(), now_unix(), None)
             }
         };
         fresh.push(Profile {
@@ -172,6 +173,7 @@ pub fn merge_subscription(data: &mut AppData, sub_id: &str, items: Vec<ParsedLin
             subscription: Some(sub_id.to_string()),
             link: None,
             created_at: created,
+            wiresock,
         });
     }
     let removed: Vec<String> = old.iter().filter(|p| !used.contains(&p.id)).map(|p| p.id.clone()).collect();

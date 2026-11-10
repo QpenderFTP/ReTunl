@@ -101,6 +101,7 @@ const ICONS = {
   terminal: 'M3.5 4.5h17v15h-17zM7.5 9.5l3 2.5-3 2.5M12.5 15h4',
   phone: 'M7 2.5h10v19H7zM11 18h2',
   qr: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2.5v2.5H14zM17.5 17.5H20V20h-2.5zM14 20h1M20 14v1',
+  chevron: 'M6 9.5l6 6 6-6',
 };
 
 export function icon(name, cls) {

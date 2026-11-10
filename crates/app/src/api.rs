@@ -11,7 +11,7 @@ use retunl_core::rulesets::{self, CatalogEntry};
 use retunl_core::singbox::{self, validate_rule, BuildOptions};
 use retunl_core::subscription::{self, ImportResult};
 use retunl_core::util::{new_id, now_unix};
-use retunl_core::{dns, wgconf, AppData, CustomPreset, Profile, Route, Rule, Settings, Subscription};
+use retunl_core::{dns, wgconf, AppData, CustomPreset, Profile, Route, Rule, Settings, Subscription, WireSock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -23,6 +23,7 @@ use crate::engine::{LogLine, Poll, Status, NEED_ADMIN};
 use crate::probe::{self, Latency};
 use crate::speed::{self, SpeedResult};
 use crate::state::{add_profiles, forget_profiles, merge_subscription, AppState};
+use crate::wiresock;
 use crate::sys::{self, Adapter, Autostart, ProcInfo};
 use crate::{fetch, files, icons};
 
@@ -74,6 +75,10 @@ pub struct View {
     blocks: BlockStats,
     /// The last speed test.
     speed: Option<SpeedResult>,
+    /// Built-in test servers the speed test can use.
+    speed_targets: Vec<speed::TargetInfo>,
+    /// Windows: wiresock-client.exe of an installed WireSock VPN Client.
+    wiresock: Option<String>,
 }
 
 #[tauri::command]
@@ -100,6 +105,8 @@ pub fn get_state(st: St<'_>) -> View {
         platform: std::env::consts::OS,
         blocks: st.engine.blocks.stats(),
         speed: st.speed.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        speed_targets: speed::catalog(),
+        wiresock: wiresock::find_client().map(|p| p.display().to_string()),
     }
 }
 
@@ -157,7 +164,17 @@ fn apply_import(st: &Arc<AppState>, res: ImportResult) -> R<ImportSummary> {
     let names: Vec<String> = res.profiles.iter().map(|p| p.name.clone()).collect();
     let links = res.links;
     let profiles = res.profiles;
-    let (added, dups) = st.mutate(|d| Ok(add_profiles(d, profiles, None, &links)))?;
+    let ws = res.wiresock;
+    let (added, dups) = st.mutate(|d| {
+        let (added, dups) = add_profiles(d, profiles, None, &links);
+        // a WireSock file: its server goes through WireSock
+        if let (Some(ws), [id]) = (ws, added.as_slice()) {
+            if let Some(p) = d.profiles.iter_mut().find(|p| &p.id == id) {
+                p.wiresock = Some(ws);
+            }
+        }
+        Ok((added, dups))
+    })?;
     sum.names = names;
     sum.added = added;
     sum.duplicates = dups;
@@ -239,7 +256,13 @@ pub async fn import_file(app: AppHandle, st: St<'_>) -> R<Option<ImportSummary>>
         let stem = files::stem(&picked);
         return match wgconf::parse(&text, &stem) {
             Ok(w) => {
-                let res = ImportResult { profiles: vec![w.profile], links: vec![None], warnings: w.warnings, ..Default::default() };
+                let res = ImportResult {
+                    profiles: vec![w.profile],
+                    links: vec![None],
+                    warnings: w.warnings,
+                    wiresock: w.wiresock,
+                    ..Default::default()
+                };
                 let sum = apply_import(st.inner(), res)?;
                 st.request_reload();
                 Ok(Some(sum))
@@ -436,6 +459,76 @@ pub fn set_profile_json(st: St<'_>, id: String, json: String) -> R<()> {
     Ok(())
 }
 
+/// Junk packets of a WireGuard server (AmneziaWG `Jc`, `Jmin`, `Jmax`): sent
+/// by the client only, so any server takes them.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct Junk {
+    jc: u64,
+    jmin: u64,
+    jmax: u64,
+}
+
+/// Switch a WireGuard server to WireSock or back, with its masking and junk packets.
+#[tauri::command]
+pub fn set_wiresock(st: St<'_>, id: String, wiresock: WireSock, junk: Junk) -> R<()> {
+    let mut ws = wiresock;
+    ws.domain = ws.domain.trim().to_ascii_lowercase();
+    ws.protocol = ws.protocol.trim().to_ascii_lowercase();
+    ws.browser = ws.browser.trim().to_ascii_lowercase();
+    if !ws.protocol.is_empty() && !wgconf::WS_PROTOCOLS.contains(&ws.protocol.as_str()) {
+        return Err(format!("Неизвестный протокол маскировки «{}»", ws.protocol));
+    }
+    if !ws.protocol.is_empty() && ws.domain.is_empty() {
+        return Err("Укажите домен для маскировки: популярный в вашей стране сайт, например ozon.ru".into());
+    }
+    if ws.domain.contains(['/', ' ', ':']) {
+        return Err("Домен для маскировки пишется без http:// и пути, например ozon.ru".into());
+    }
+    if ws.protocol != "quic" || !wgconf::WS_BROWSERS.contains(&ws.browser.as_str()) {
+        ws.browser = String::new();
+    }
+    if ws.protocol.is_empty() {
+        ws.domain = String::new();
+    }
+    if junk.jc > 128 {
+        return Err("Мусорных пакетов может быть не больше 128".into());
+    }
+    if junk.jc > 0 && (junk.jmin > junk.jmax || junk.jmax > 1280) {
+        return Err("Размер мусорных пакетов: минимум не больше максимума, максимум до 1280 байт".into());
+    }
+    if ws.junk_delay > 1000 {
+        return Err("Пауза между мусорными пакетами — не больше 1000 мс".into());
+    }
+    st.mutate(|d| {
+        let p = d.profiles.iter_mut().find(|p| p.id == id).ok_or("Сервер не найден")?;
+        if p.protocol() != "wireguard" {
+            return Err("Через WireSock подключаются только серверы WireGuard и AmneziaWG".into());
+        }
+        let mut ob = p.outbound.clone();
+        let o = ob.as_object_mut().ok_or("Сервер повреждён")?;
+        if junk.jc > 0 {
+            o.insert("jc".into(), junk.jc.into());
+            o.insert("jmin".into(), junk.jmin.into());
+            o.insert("jmax".into(), junk.jmax.into());
+        } else {
+            for k in retunl_core::awg::JUNK_KEYS {
+                o.remove(*k);
+            }
+        }
+        if ws.enabled {
+            if let Some(why) = wgconf::wiresock_unsupported(&ob) {
+                return Err(why);
+            }
+        }
+        p.outbound = ob;
+        p.wiresock = (ws != WireSock::default()).then_some(ws);
+        Ok(())
+    })?;
+    st.request_reload();
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_profiles(st: St<'_>, ids: Vec<String>) -> R<usize> {
     let fixed = st.mutate(|d| {
@@ -465,11 +558,14 @@ pub async fn list_adapters() -> R<Vec<Adapter>> {
 #[tauri::command]
 pub async fn test_latency(st: St<'_>, ids: Option<Vec<String>>) -> R<HashMap<String, Latency>> {
     let data = st.snapshot();
+    // a server WireSock runs right now is measured through WireSock
+    let link = st.engine.wiresock_link();
     let profiles: Vec<Profile> = data
         .profiles
         .iter()
         .filter(|p| ids.as_ref().is_none_or(|ids| ids.contains(&p.id)))
         .cloned()
+        .map(|p| wiresock::through_tunnel(p, link.as_ref()))
         .collect();
     if profiles.is_empty() {
         return Ok(HashMap::new());
@@ -479,15 +575,22 @@ pub async fn test_latency(st: St<'_>, ids: Option<Vec<String>>) -> R<HashMap<Str
     Ok(results)
 }
 
-/// Download speed and ping without the VPN and through the selected server.
-/// Progress comes as `speed-progress` events.
+/// Download speed and ping without the VPN and through a server: `profile`
+/// for this run only, else the one from the speed settings, else the selected
+/// one. Progress comes as `speed-progress` events.
 #[tauri::command]
-pub async fn speed_test(app: AppHandle, st: St<'_>) -> R<SpeedResult> {
+pub async fn speed_test(app: AppHandle, st: St<'_>, profile: Option<String>) -> R<SpeedResult> {
     let Ok(_running) = st.speed_lock.try_lock() else {
         return Err("Проверка скорости уже идёт.".into());
     };
     let data = st.snapshot();
-    let profile = data.active_profile().cloned();
+    let profile = profile
+        .as_deref()
+        .or(data.settings.speed.profile.as_deref())
+        .and_then(|id| data.profile(id))
+        .or_else(|| data.active_profile())
+        .cloned()
+        .map(|p| wiresock::through_tunnel(p, st.engine.wiresock_link().as_ref()));
     let h = app.clone();
     let r = speed::run(&st.paths, &data.settings, profile, st.engine.job(), move |p| {
         let _ = h.emit("speed-progress", &p);
@@ -759,6 +862,7 @@ fn config_part(s: &Settings) -> Settings {
     c.start_minimized = false;
     c.run_as_admin = false;
     c.test_url = String::new();
+    c.speed = Default::default();
     c
 }
 
@@ -774,6 +878,19 @@ pub fn update_settings(st: St<'_>, patch: Value) -> R<Settings> {
         dns::server(&next.dns.remote, "x", None, "y").map_err(|e| format!("DNS через VPN: {e}"))?;
         if next.mixed_port < 1024 || next.controller_port < 1024 {
             return Err("Порты должны быть от 1024 до 65535".into());
+        }
+        let mut next = next;
+        for own in &mut next.speed.custom {
+            own.url = own.url.trim().to_string();
+            speed::check_custom_url(&own.url)?;
+            own.name = own.name.trim().to_string();
+            if own.name.is_empty() {
+                // the host says where the file is
+                own.name = reqwest::Url::parse(&own.url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            }
+            if own.id.trim().is_empty() {
+                return Err("У своего тестового сервера нет идентификатора".into());
+            }
         }
         d.settings = next.clone();
         Ok((before, next))
@@ -819,6 +936,7 @@ pub fn preview_config(st: St<'_>) -> R<String> {
             extended_available: st.paths.find_lx_core().is_some(),
             // the preview shows the settings as chosen; the TLS switch happens on connect
             direct_dns_tls: false,
+            wiresock: None,
         },
     )
     .map_err(|e| e.0)?;
@@ -1089,6 +1207,7 @@ mod tests {
             subscription: Some("s1".into()),
             link: None,
             created_at: 0,
+            wiresock: None,
         });
         data.rules.push(Rule { id: "r1".into(), name: "x".into(), apps: vec!["a.exe".into()], ..Default::default() });
         data.presets.push(p);

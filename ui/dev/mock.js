@@ -47,6 +47,7 @@
       tun: { interface_name: 'ReTunl', stack: 'mixed', mtu: 9000, strict_route: false },
       mixed_port: 2080, controller_port: 19190, direct_interface: null, log_level: 'info',
       test_url: 'https://www.gstatic.com/generate_204', connect_on_launch: false, close_to_tray: true, start_minimized: true, run_as_admin: true, core: 'auto',
+      speed: { targets: [], custom: [], profile: null },
     },
   };
   if (/empty/.test(location.hash)) { data.profiles = []; data.subscriptions = []; data.rules = []; data.settings.active_profile = null; }
@@ -79,7 +80,7 @@
   const AD_HOSTS = ['mc.yandex.ru', 'an.yandex.ru', 'googleads.g.doubleclick.net', 'www.google-analytics.com', 'ads.vk.com', 'top-fwz1.mail.ru', 'pagead2.googlesyndication.com'];
   const blocks = /noblocks/.test(location.hash) ? { session: 0, total: 0, top: [], counting: false } : { session: 214, total: 48213, top: [['mc.yandex.ru', 61], ['googleads.g.doubleclick.net', 44], ['top-fwz1.mail.ru', 30], ['www.google-analytics.com', 22], ['ads.vk.com', 9]], counting: false };
   const blockTop = new Map(blocks.top);
-  let speed = /speed/.test(location.hash) ? { direct: { mbps: 187.4, ping_ms: 24, server: 'Selectel, Россия', error: null }, vpn: { mbps: 142.9, ping_ms: 61, server: 'Cloudflare', error: null }, profile: 'Нидерланды Reality', at: now() - 300 } : null;
+  let speed = /speed/.test(location.hash) ? { direct: { mbps: 187.4, ping_ms: 24, server: 'Selectel, Санкт-Петербург', error: null }, vpn: { mbps: 142.9, ping_ms: 61, server: 'Cloudflare', error: null }, profile: 'Нидерланды Reality', at: now() - 300 } : null;
   let conns = [];
 
   const log = (level, text, source = 'core') => {
@@ -174,6 +175,20 @@
       { value: 'local', label: 'Системный DNS' },
     ],
   };
+
+  const SPEED_TARGETS = [
+    { id: 'cloudflare', name: 'Cloudflare', city: '', country: '', region: 'any', auto: true },
+    { id: 'selectel-spb', name: 'Selectel', city: 'Санкт-Петербург', country: 'Россия', region: 'ru', auto: true },
+    { id: 'hostkey-msk', name: 'HOSTKEY', city: 'Москва', country: 'Россия', region: 'ru', auto: false },
+    { id: 'hetzner-hel', name: 'Hetzner', city: 'Хельсинки', country: 'Финляндия', region: 'eu', auto: true },
+    { id: 'hetzner-fsn', name: 'Hetzner', city: 'Фалькенштайн', country: 'Германия', region: 'eu', auto: false },
+    { id: 'hetzner-nbg', name: 'Hetzner', city: 'Нюрнберг', country: 'Германия', region: 'eu', auto: false },
+    { id: 'hostkey-ams', name: 'HOSTKEY', city: 'Амстердам', country: 'Нидерланды', region: 'eu', auto: false },
+    { id: 'ovh-gra', name: 'OVH', city: 'Гравелин', country: 'Франция', region: 'eu', auto: true },
+    { id: 'scaleway-par', name: 'Scaleway', city: 'Париж', country: 'Франция', region: 'eu', auto: false },
+    { id: 'hetzner-ash', name: 'Hetzner', city: 'Эшберн', country: 'США, восток', region: 'us', auto: false },
+    { id: 'hetzner-hil', name: 'Hetzner', city: 'Хиллсборо', country: 'США, запад', region: 'us', auto: false },
+  ];
 
   const merge = (t, p) => {
     for (const k in p) {
@@ -353,7 +368,7 @@
 
   const handlers = {
     ...adminHandlers,
-    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.2', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed }),
+    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.2', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed, speed_targets: SPEED_TARGETS, wiresock: /nows/.test(location.hash) ? null : 'C:\\Program Files\\WireSock VPN Client\\bin\\wiresock-client.exe' }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });
@@ -385,6 +400,14 @@
     delete_subscription: ({ id: sid }) => { data.profiles = data.profiles.filter((p) => p.subscription !== sid); data.subscriptions = data.subscriptions.filter((s) => s.id !== sid); },
     set_active: ({ id: pid }) => { data.settings.active_profile = pid; },
     rename_profile: ({ id: pid, name }) => { data.profiles.find((p) => p.id === pid).name = name; },
+    set_wiresock: ({ id: pid, wiresock, junk }) => {
+      const p = data.profiles.find((x) => x.id === pid);
+      if (wiresock.protocol && !wiresock.domain) throw 'Укажите домен для маскировки: популярный в вашей стране сайт, например ozon.ru';
+      if (wiresock.enabled && typeof p.outbound.h1 === 'string') throw 'WireSock понимает только AmneziaWG 1.0, а у сервера есть параметры поновее: H1, I1. Подключайте его без WireSock.';
+      for (const k of ['jc', 'jmin', 'jmax']) { if (junk.jc) p.outbound[k] = junk[k]; else delete p.outbound[k]; }
+      const empty = !wiresock.enabled && !wiresock.protocol && !wiresock.junk_delay;
+      if (empty) delete p.wiresock; else p.wiresock = wiresock;
+    },
     set_profile_json: ({ id: pid, json }) => { const v = JSON.parse(json); data.profiles.find((p) => p.id === pid).outbound = v; },
     delete_profiles: ({ ids }) => { data.profiles = data.profiles.filter((p) => !ids.includes(p.id)); let n = 0; data.rules.forEach((r) => { if (r.route.kind === 'profile' && ids.includes(r.route.id)) { r.route = { kind: 'proxy' }; n++; } }); if (ids.includes(data.settings.active_profile)) data.settings.active_profile = data.profiles[0] ? data.profiles[0].id : null; return n; },
     add_interface: ({ name }) => { const p = { id: id(), name, outbound: { type: 'direct', bind_interface: name } }; data.profiles.push(p); return p.id; },
@@ -525,16 +548,21 @@
       return core;
     },
     update_rule_sets: async () => { await wait(800); return 6; },
-    speed_test: async () => {
-      const ap = data.profiles.find((p) => p.id === data.settings.active_profile);
-      const part = async (stage, top, server, ping) => {
-        emit('speed-progress', { stage, step: 'pick', mbps: null, server: null }); await wait(900);
+    speed_test: async ({ profile } = {}) => {
+      const sp = data.settings.speed;
+      const byId = (pid) => data.profiles.find((p) => p.id === pid);
+      const ap = byId(profile) || byId(sp.profile) || byId(data.settings.active_profile);
+      const all = [...SPEED_TARGETS.map((t) => ({ id: t.id, name: t.city ? `${t.name}, ${t.city}` : t.name })), ...sp.custom];
+      const picked = all.filter((t) => sp.targets.includes(t.id));
+      const part = async (stage, top, auto, ping) => {
+        const server = picked.length ? picked[stage === 'vpn' ? picked.length - 1 : 0].name : auto;
+        if (picked.length !== 1) { emit('speed-progress', { stage, step: 'pick', mbps: null, server: null }); await wait(900); }
         emit('speed-progress', { stage, step: 'ping', mbps: null, server }); await wait(500);
         let v = 0;
         for (let i = 0; i < 16; i++) { v = top * (0.55 + 0.45 * Math.min(1, i / 5)) * (0.95 + Math.random() * 0.1); emit('speed-progress', { stage, step: 'download', mbps: Math.round(v * 10) / 10, server }); await wait(250); }
         return { mbps: Math.round(v * 10) / 10, ping_ms: ping, server, error: null };
       };
-      const direct = await part('direct', 190, 'Selectel, Россия', 23);
+      const direct = await part('direct', 190, 'Selectel, Санкт-Петербург', 23);
       const vpn = ap ? await part('vpn', 120, 'Cloudflare', 58) : null;
       speed = { direct, vpn, profile: ap ? ap.name : null, at: now() };
       return speed;

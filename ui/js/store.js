@@ -73,6 +73,11 @@ const TRANSPORT = {
 /** 'extended' — runs only on sing-box-lx, 'prefer' — runs better there, undefined — anywhere. */
 export const coreNeed = (p) => (store.view.core.needs || {})[p.id];
 export const hasLx = () => !!store.view.core.lx_path;
+export const isWindows = () => !!store.view && store.view.platform === 'windows';
+/** Windows: WireSock VPN Client runs this WireGuard server, sing-box only reaches it. */
+export const viaWireSock = (p) => isWindows() && !!(p && p.wiresock && p.wiresock.enabled);
+/** The server runs only on sing-box-lx, and ReTunl has none. */
+export const needsLx = (p) => coreNeed(p) === 'extended' && !hasLx() && !viaWireSock(p);
 
 export function protoParts(p) {
   const o = p.outbound || {};

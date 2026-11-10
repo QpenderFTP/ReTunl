@@ -17,6 +17,8 @@ pub struct ImportResult {
     pub warnings: Vec<String>,
     /// http(s) lines — most likely subscription addresses.
     pub urls: Vec<String>,
+    /// WireSock settings of a WireGuard file (`Id`, `Ip`, `Jd`…).
+    pub wiresock: Option<crate::model::WireSock>,
 }
 
 /// Parse anything a user may paste or a subscription may return.
@@ -35,6 +37,7 @@ fn parse_inner(text: &str, depth: u8) -> ImportResult {
             Ok(r) => {
                 out.profiles.push(r.profile);
                 out.warnings.extend(r.warnings);
+                out.wiresock = r.wiresock;
             }
             Err(e) => out.errors.push(("WireGuard-конфиг".into(), e.to_string())),
         }

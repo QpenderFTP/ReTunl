@@ -1,7 +1,9 @@
-//! Download speed and ping, straight and through the selected server. A
-//! separate sing-box serves two local proxies: one goes out directly, past
-//! the tunnel like sing-box's own traffic, the other through the server.
-//! Each path picks the test server that answers it fastest.
+//! Download speed and ping, straight and through a server. A separate
+//! sing-box serves two local proxies: one goes out directly, past the tunnel
+//! like sing-box's own traffic, the other through the server.
+//!
+//! The file comes from a test server: the user's choice ([`SpeedPrefs`]), or
+//! the one of ReTunl's usual set that answers the path fastest.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -9,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use retunl_core::singbox::build_probe;
 use retunl_core::util::now_unix;
-use retunl_core::{Profile, Settings};
+use retunl_core::{Profile, Settings, SpeedPrefs};
 use serde::Serialize;
 use serde_json::json;
 use tokio::time::timeout_at;
@@ -18,25 +20,119 @@ use crate::paths::Paths;
 use crate::probe;
 use crate::sys;
 
-struct Target {
+/// A built-in test server: a large file a hosting company keeps for speed tests.
+struct Builtin {
+    id: &'static str,
     name: &'static str,
+    city: &'static str,
+    country: &'static str,
+    /// "any" (the nearest node of a worldwide network), "ru", "eu" or "us".
+    region: &'static str,
     url: &'static str,
     /// For the ping: an empty answer, else one byte of `url`.
     ping: Option<&'static str>,
+    /// Takes part when the choice is left to ReTunl: in different networks, so
+    /// one of them is usually close to wherever the traffic leaves.
+    auto: bool,
 }
 
-/// Large files on fast public servers, in different networks: one of them is
-/// usually close to wherever the traffic leaves.
-const TARGETS: &[Target] = &[
-    Target {
+const fn file(
+    id: &'static str,
+    name: &'static str,
+    city: &'static str,
+    country: &'static str,
+    region: &'static str,
+    url: &'static str,
+    auto: bool,
+) -> Builtin {
+    Builtin { id, name, city, country, region, url, ping: None, auto }
+}
+
+/// Only servers that open from Russian networks without a VPN: the direct
+/// measurement needs them too.
+const BUILTIN: &[Builtin] = &[
+    Builtin {
+        id: "cloudflare",
         name: "Cloudflare",
+        city: "",
+        country: "",
+        region: "any",
         url: "https://speed.cloudflare.com/__down?bytes=50000000",
         ping: Some("https://speed.cloudflare.com/__down?bytes=0"),
+        auto: true,
     },
-    Target { name: "OVH, Франция", url: "https://proof.ovh.net/files/100Mb.dat", ping: None },
-    Target { name: "Hetzner, Финляндия", url: "https://hel1-speed.hetzner.com/100MB.bin", ping: None },
-    Target { name: "Selectel, Россия", url: "https://speedtest.selectel.ru/100MB", ping: None },
+    file("selectel-spb", "Selectel", "Санкт-Петербург", "Россия", "ru", "https://speedtest.selectel.ru/100MB", true),
+    file("hostkey-msk", "HOSTKEY", "Москва", "Россия", "ru", "https://speedtest.hostkey.ru/files/100mb.bin", false),
+    file("hetzner-hel", "Hetzner", "Хельсинки", "Финляндия", "eu", "https://hel1-speed.hetzner.com/100MB.bin", true),
+    file("hetzner-fsn", "Hetzner", "Фалькенштайн", "Германия", "eu", "https://fsn1-speed.hetzner.com/100MB.bin", false),
+    file("hetzner-nbg", "Hetzner", "Нюрнберг", "Германия", "eu", "https://nbg1-speed.hetzner.com/100MB.bin", false),
+    file("hostkey-ams", "HOSTKEY", "Амстердам", "Нидерланды", "eu", "https://speedtest.hostkey.com/files/100mb.bin", false),
+    file("ovh-gra", "OVH", "Гравелин", "Франция", "eu", "https://proof.ovh.net/files/100Mb.dat", true),
+    file("scaleway-par", "Scaleway", "Париж", "Франция", "eu", "https://scaleway.testdebit.info/100M.iso", false),
+    file("hetzner-ash", "Hetzner", "Эшберн", "США, восток", "us", "https://ash-speed.hetzner.com/100MB.bin", false),
+    file("hetzner-hil", "Hetzner", "Хиллсборо", "США, запад", "us", "https://hil-speed.hetzner.com/100MB.bin", false),
 ];
+
+/// A built-in test server as the list in the UI shows it.
+#[derive(Serialize, Clone, Debug)]
+pub struct TargetInfo {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub city: &'static str,
+    pub country: &'static str,
+    pub region: &'static str,
+    pub auto: bool,
+}
+
+pub fn catalog() -> Vec<TargetInfo> {
+    BUILTIN
+        .iter()
+        .map(|b| TargetInfo { id: b.id, name: b.name, city: b.city, country: b.country, region: b.region, auto: b.auto })
+        .collect()
+}
+
+/// A test server a measurement can use.
+#[derive(Clone, Debug, PartialEq)]
+struct Target {
+    /// "Hetzner, Хельсинки": how the result names it.
+    name: String,
+    url: String,
+    ping: Option<String>,
+}
+
+impl From<&Builtin> for Target {
+    fn from(b: &Builtin) -> Self {
+        let name = if b.city.is_empty() { b.name.to_string() } else { format!("{}, {}", b.name, b.city) };
+        Target { name, url: b.url.to_string(), ping: b.ping.map(str::to_string) }
+    }
+}
+
+/// The servers a measurement chooses from: the ones the user ticked, or
+/// ReTunl's usual set when nothing is ticked (or what was ticked is gone).
+fn candidates(prefs: &SpeedPrefs) -> Vec<Target> {
+    let picked = |id: &str| prefs.targets.iter().any(|t| t == id);
+    let mut list: Vec<Target> = BUILTIN.iter().filter(|b| picked(b.id)).map(Target::from).collect();
+    list.extend(
+        prefs
+            .custom
+            .iter()
+            .filter(|c| picked(&c.id))
+            .map(|c| Target { name: c.name.clone(), url: c.url.clone(), ping: None }),
+    );
+    if list.is_empty() {
+        list = BUILTIN.iter().filter(|b| b.auto).map(Target::from).collect();
+    }
+    list
+}
+
+/// Why `url` cannot be a test server, if it cannot.
+pub fn check_custom_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|_| "Адрес тестового сервера должен быть ссылкой на файл, например https://example.com/100MB.bin".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("Адрес тестового сервера должен начинаться с http:// или https://".into());
+    }
+    Ok(())
+}
 
 /// How long all servers race before the fastest one is picked.
 const PICK_TIME: Duration = Duration::from_millis(2500);
@@ -114,9 +210,10 @@ pub async fn run(
     cfg["inbounds"] = json!(inbounds);
     let core = probe::launch(paths, &core, &cfg, "speed.json", ctrl, &secret, job).await?;
 
-    let direct = measure_path(direct_port, "direct", &progress).await;
+    let targets = candidates(&settings.speed);
+    let direct = measure_path(direct_port, "direct", &targets, &progress).await;
     let vpn = match (&vpn_profile, vpn_error) {
-        (Some(_), _) => Some(measure_path(vpn_port, "vpn", &progress).await),
+        (Some(_), _) => Some(measure_path(vpn_port, "vpn", &targets, &progress).await),
         (None, Some(error)) => Some(SpeedPart { error: Some(error), ..SpeedPart::default() }),
         (None, None) => None,
     };
@@ -136,14 +233,25 @@ fn client(port: u16) -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn measure_path(port: u16, stage: &'static str, progress: &(impl Fn(Progress) + Send + Sync)) -> SpeedPart {
+async fn measure_path(
+    port: u16,
+    stage: &'static str,
+    targets: &[Target],
+    progress: &(impl Fn(Progress) + Send + Sync),
+) -> SpeedPart {
     let fail = |e: &str| SpeedPart { error: Some(e.to_string()), ..SpeedPart::default() };
     let http = match client(port) {
         Ok(c) => c,
         Err(e) => return fail(&e),
     };
-    progress(Progress { stage, step: "pick", mbps: None, server: None });
-    let ranked = race(&http).await;
+    // one server to use: nothing to choose
+    let only = targets.len() == 1;
+    let ranked = if only {
+        targets.to_vec()
+    } else {
+        progress(Progress { stage, step: "pick", mbps: None, server: None });
+        race(&http, targets).await
+    };
     let mut result = fail(if stage == "vpn" {
         "Через сервер не открылся ни один тестовый сервер. Проверьте задержку сервера на экране «Серверы»."
     } else {
@@ -151,25 +259,33 @@ async fn measure_path(port: u16, stage: &'static str, progress: &(impl Fn(Progre
     });
     // a test server may refuse in the middle (they limit how much one address takes)
     for target in ranked.into_iter().take(2) {
-        let server = Some(target.name.to_string());
+        let server = Some(target.name.clone());
         progress(Progress { stage, step: "ping", mbps: None, server: server.clone() });
-        let ping_ms = ping(&http, target).await;
-        let mbps = download(&http, target.url, |mbps| {
+        let ping_ms = ping(&http, &target).await;
+        let mbps = download(&http, &target.url, |mbps| {
             progress(Progress { stage, step: "download", mbps: Some(mbps), server: server.clone() })
         })
         .await;
         if let Some(mbps) = mbps {
             return SpeedPart { mbps: Some(mbps), ping_ms, server, error: None };
         }
-        result = SpeedPart { ping_ms, server, ..fail("Загрузка оборвалась. Попробуйте ещё раз.") };
+        result = SpeedPart {
+            ping_ms,
+            server,
+            ..fail(if only {
+                "Тестовый сервер не отдал файл. Выберите другой в настройках проверки."
+            } else {
+                "Загрузка оборвалась. Попробуйте ещё раз."
+            })
+        };
     }
     result
 }
 
 /// Read `url` into `counter` until `until`.
-async fn pull(http: reqwest::Client, url: &'static str, counter: Arc<AtomicU64>, until: Instant, cap: u64) -> bool {
+async fn pull(http: reqwest::Client, url: Arc<str>, counter: Arc<AtomicU64>, until: Instant, cap: u64) -> bool {
     let until = tokio::time::Instant::from_std(until);
-    let Ok(Ok(mut r)) = timeout_at(until, http.get(url).send()).await else { return false };
+    let Ok(Ok(mut r)) = timeout_at(until, http.get(&*url).send()).await else { return false };
     if !r.status().is_success() {
         return false;
     }
@@ -182,25 +298,25 @@ async fn pull(http: reqwest::Client, url: &'static str, counter: Arc<AtomicU64>,
 }
 
 /// Targets that answered a short race, fastest first.
-async fn race(http: &reqwest::Client) -> Vec<&'static Target> {
+async fn race(http: &reqwest::Client, targets: &[Target]) -> Vec<Target> {
     let until = Instant::now() + PICK_TIME;
-    let counters: Vec<Arc<AtomicU64>> = TARGETS.iter().map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let tasks: Vec<_> = TARGETS
+    let counters: Vec<Arc<AtomicU64>> = targets.iter().map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let tasks: Vec<_> = targets
         .iter()
         .zip(&counters)
-        .map(|(t, c)| tokio::spawn(pull(http.clone(), t.url, c.clone(), until, u64::MAX)))
+        .map(|(t, c)| tokio::spawn(pull(http.clone(), t.url.as_str().into(), c.clone(), until, u64::MAX)))
         .collect();
     for t in tasks {
         let _ = t.await;
     }
-    let mut got: Vec<(&'static Target, u64)> = TARGETS
+    let mut got: Vec<(&Target, u64)> = targets
         .iter()
         .zip(&counters)
         .map(|(t, c)| (t, c.load(Ordering::Relaxed)))
         .filter(|(_, n)| *n >= 32 << 10)
         .collect();
     got.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    got.into_iter().map(|(t, _)| t).collect()
+    got.into_iter().map(|(t, _)| t.clone()).collect()
 }
 
 /// Round trip to the test server over an open connection, in milliseconds.
@@ -208,9 +324,9 @@ async fn ping(http: &reqwest::Client, target: &Target) -> Option<u32> {
     let mut times = Vec::new();
     for i in 0..4 {
         let t = Instant::now();
-        let req = match target.ping {
+        let req = match &target.ping {
             Some(url) => http.get(url),
-            None => http.get(target.url).header(reqwest::header::RANGE, "bytes=0-0"),
+            None => http.get(&target.url).header(reqwest::header::RANGE, "bytes=0-0"),
         };
         // the body is read so the connection stays open for the next round
         let r = tokio::time::timeout(Duration::from_secs(5), async { req.send().await?.bytes().await }).await;
@@ -227,17 +343,18 @@ async fn ping(http: &reqwest::Client, target: &Target) -> Option<u32> {
 }
 
 /// Several parallel downloads for a few seconds; megabits per second.
-async fn download(http: &reqwest::Client, url: &'static str, live: impl Fn(f64) + Send + Sync) -> Option<f64> {
+async fn download(http: &reqwest::Client, url: &str, live: impl Fn(f64) + Send + Sync) -> Option<f64> {
     let start = Instant::now();
     let until = start + DOWNLOAD_TIME;
     let total = Arc::new(AtomicU64::new(0));
+    let url: Arc<str> = url.into();
     let tasks: Vec<_> = (0..STREAMS)
         .map(|_| {
-            let (http, total) = (http.clone(), total.clone());
+            let (http, total, url) = (http.clone(), total.clone(), url.clone());
             tokio::spawn(async move {
                 // a stream that finishes its file starts another one
                 while Instant::now() < until && total.load(Ordering::Relaxed) < MAX_BYTES {
-                    if !pull(http.clone(), url, total.clone(), until, MAX_BYTES).await {
+                    if !pull(http.clone(), url.clone(), total.clone(), until, MAX_BYTES).await {
                         return;
                     }
                 }
@@ -282,7 +399,55 @@ fn mbits(bytes: u64, secs: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use retunl_core::SpeedCustom;
+
     use super::*;
+
+    fn names(prefs: &SpeedPrefs) -> Vec<String> {
+        candidates(prefs).into_iter().map(|t| t.name).collect()
+    }
+
+    #[test]
+    fn nothing_ticked_means_the_usual_set() {
+        let auto = names(&SpeedPrefs::default());
+        assert_eq!(auto, ["Cloudflare", "Selectel, Санкт-Петербург", "Hetzner, Хельсинки", "OVH, Гравелин"]);
+        // a server that is no longer in the list does not leave the test without servers
+        let stale = SpeedPrefs { targets: vec!["gone".into()], ..SpeedPrefs::default() };
+        assert_eq!(names(&stale), auto);
+    }
+
+    #[test]
+    fn ticked_servers_are_the_only_candidates() {
+        let own = SpeedCustom { id: "c1".into(), name: "Мой VPS".into(), url: "https://vps.example/1g.bin".into() };
+        let other = SpeedCustom { id: "c2".into(), name: "Не отмечен".into(), url: "https://x.example/f".into() };
+        let prefs = SpeedPrefs {
+            targets: vec!["c1".into(), "hetzner-ash".into()],
+            custom: vec![own, other],
+            profile: None,
+        };
+        let got = candidates(&prefs);
+        assert_eq!(got.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Hetzner, Эшберн", "Мой VPS"]);
+        assert_eq!(got[1].url, "https://vps.example/1g.bin");
+        assert_eq!(got[1].ping, None);
+    }
+
+    #[test]
+    fn builtin_ids_are_unique_and_urls_are_https() {
+        let mut ids: Vec<_> = BUILTIN.iter().map(|b| b.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), BUILTIN.len());
+        assert!(BUILTIN.iter().all(|b| b.url.starts_with("https://")));
+    }
+
+    #[test]
+    fn custom_url_must_be_http() {
+        assert!(check_custom_url("https://example.com/100MB.bin").is_ok());
+        assert!(check_custom_url(" http://10.0.0.5:8080/big ").is_ok());
+        assert!(check_custom_url("example.com/100MB.bin").is_err());
+        assert!(check_custom_url("ftp://example.com/f").is_err());
+        assert!(check_custom_url("").is_err());
+    }
 
     /// Needs the internet and sing-box in .tools: `cargo test -p retunl speed -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread")]
@@ -304,6 +469,14 @@ mod tests {
         assert!(r.direct.mbps.unwrap_or(0.0) > 0.0, "{:?}", r.direct.error);
         assert!(r.vpn.is_none());
 
+        // one ticked server: nothing to pick, and the result names it
+        let mut one = Settings::default();
+        one.speed.targets = vec!["selectel-spb".into()];
+        let r = run(&paths, &one, None, None, |p| assert_ne!(p.step, "pick")).await.unwrap();
+        eprintln!("{r:?}");
+        assert_eq!(r.direct.server.as_deref(), Some("Selectel, Санкт-Петербург"));
+        assert!(r.direct.mbps.unwrap_or(0.0) > 0.0, "{:?}", r.direct.error);
+
         // "through the server": a local Shadowsocks server stands in for a VPN
         let port = probe::free_port().unwrap();
         let server_cfg = dir.join("ss.json");
@@ -319,6 +492,7 @@ mod tests {
             subscription: None,
             link: None,
             created_at: 0,
+            wiresock: None,
         };
         let r = run(&paths, &Settings::default(), Some(profile), None, |_| {}).await.unwrap();
         let _ = server.kill();

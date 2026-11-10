@@ -17,6 +17,27 @@ pub struct Profile {
     pub link: Option<String>,
     #[serde(default)]
     pub created_at: i64,
+    /// WireGuard through WireSock VPN Client (Windows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiresock: Option<WireSock>,
+}
+
+/// How a WireGuard server goes through WireSock VPN Client: WireSock masks
+/// the handshake (fake QUIC/DNS packets, junk packets) where plain WireGuard
+/// is blocked. The masking is sent by the client only, so any WireGuard server
+/// takes it. Junk packets (Jc, Jmin, Jmax) stay in the server's own fields.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct WireSock {
+    pub enabled: bool,
+    /// `Id`: a popular site the traffic pretends to go to.
+    pub domain: String,
+    /// `Ip`: `quic`, `dns`, `sip` or `stun`; empty: no masking.
+    pub protocol: String,
+    /// `Ib`: `chrome`, `firefox` or `curl` (QUIC only).
+    pub browser: String,
+    /// `Jd`: pause between junk packets, milliseconds.
+    pub junk_delay: u32,
 }
 
 /// sing-box types that live in `endpoints`, not `outbounds`.
@@ -97,6 +118,11 @@ impl Profile {
                     .and_then(|p| p.parse().ok())
             })?;
         Some((host, port))
+    }
+
+    /// A WireGuard server switched to WireSock.
+    pub fn uses_wiresock(&self) -> bool {
+        self.protocol() == "wireguard" && self.wiresock.as_ref().is_some_and(|w| w.enabled)
     }
 
     /// Whether this server needs the sing-box-lx core.
@@ -312,6 +338,27 @@ impl Default for TunSettings {
     }
 }
 
+/// What the speed test downloads and through which server.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct SpeedPrefs {
+    /// Ids of the test servers to choose from, built-in or the user's own.
+    /// Empty: ReTunl picks among its usual ones.
+    pub targets: Vec<String>,
+    /// The user's own test servers.
+    pub custom: Vec<SpeedCustom>,
+    /// Server the VPN part goes through; `None`: the selected one.
+    pub profile: Option<String>,
+}
+
+/// A test server the user added: any large file over HTTP(S).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct SpeedCustom {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -341,6 +388,7 @@ pub struct Settings {
     /// Windows: every start is elevated. A start by hand asks UAC; autostart goes
     /// through Task Scheduler and does not.
     pub run_as_admin: bool,
+    pub speed: SpeedPrefs,
 }
 
 impl Default for Settings {
@@ -366,6 +414,7 @@ impl Default for Settings {
             start_minimized: true,
             // «Все программы», the default mode, needs admin rights on Windows anyway
             run_as_admin: true,
+            speed: SpeedPrefs::default(),
         }
     }
 }

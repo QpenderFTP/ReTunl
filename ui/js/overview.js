@@ -1,11 +1,11 @@
 // Обзор: the connect switch and the fork — where each kind of traffic goes.
 
 import {
-  h, s, add, icon, seg, invoke, fmtRate, fmtBytes, fmtClock, fmtAgo, now, plural, banner, errorToast,
+  h, s, add, icon, seg, invoke, fmtRate, fmtBytes, fmtClock, fmtAgo, now, plural, banner, errorToast, dialog,
 } from './lib.js';
 import {
   store, D, S, ST, act, isOn, activeProfile, profile, toggleConnection, profileOptions, routePicker,
-  routeKey, connBranch, protoParts, addressOf, importClipboard, downloadCore, paintCoreBar, coreNeed, hasLx,
+  routeKey, connBranch, protoParts, addressOf, importClipboard, downloadCore, paintCoreBar, needsLx, hasLx,
   isMac, isAndroid, osName, here,
 } from './store.js';
 
@@ -115,7 +115,7 @@ function banners(st) {
   }
   const ap = activeProfile();
   const lxFailed = st.phase === 'failed' && st.error && st.error.includes('sing-box-lx');
-  if (!hasLx() && (lxFailed || (ap && coreNeed(ap) === 'extended' && st.phase !== 'failed'))) {
+  if (!hasLx() && (lxFailed || (ap && needsLx(ap) && st.phase !== 'failed'))) {
     const bar = h('div.progress', { hidden: true }, h('div.progress-bar'));
     refs.lxBar = bar;
     const b = banner(lxFailed ? 'error' : 'warn', lxFailed ? 'Не удалось подключиться' : `Серверу «${ap.name}» нужно ядро sing-box-lx`,
@@ -310,8 +310,27 @@ function speedSign(route, value, fill, label) {
       h('span.sign-unit', 'Мбит/с')));
 }
 
-function speedColumn(stage, part, run) {
-  const ap = activeProfile();
+/** "Hetzner, Хельсинки": a built-in test server as results name it. */
+const targetName = (t) => (t.city ? `${t.name}, ${t.city}` : t.name);
+const speedPrefs = () => S().speed || { targets: [], custom: [], profile: null };
+
+/** The server the VPN measurement goes through: the one chosen for the test, else the selected one. */
+function speedProfile() {
+  const id = speedPrefs().profile;
+  return (id && profile(id)) || activeProfile();
+}
+
+/** The saved choice of test servers in a few words. */
+function targetSummary() {
+  const sp = speedPrefs();
+  const all = [...store.view.speed_targets.map((t) => ({ id: t.id, name: targetName(t) })), ...sp.custom];
+  const picked = all.filter((t) => sp.targets.includes(t.id));
+  if (!picked.length) return 'Авто';
+  return picked.length === 1 ? picked[0].name : plural(picked.length, 'сервер', 'сервера', 'серверов');
+}
+
+function speedColumn(stage, part, run, vpnName) {
+  const ap = vpnName;
   const vpn = stage === 'vpn';
   const route = vpn ? 'tunnel' : 'direct';
   const title = vpn ? 'Через VPN' : 'Без VPN';
@@ -332,9 +351,9 @@ function speedColumn(stage, part, run) {
   } else if (part) {
     lines = [part.ping_ms != null && h('span', `Пинг ${part.ping_ms} мс`), part.server && h('span', { title: 'Тестовый сервер' }, part.server)];
   } else {
-    lines = [h('span', vpn ? 'Через выбранный сервер' : 'Напрямую, мимо туннеля')];
+    lines = [h('span', vpn ? (speedPrefs().profile ? 'Через этот сервер' : 'Через выбранный сервер') : 'Напрямую, мимо туннеля')];
   }
-  const sub = vpn && ap ? ap.name : null;
+  const sub = vpn ? ap : null;
   return h('div.speed-col' + (live ? '.live' : ''),
     speedSign(route, value, fill, `${title}: ${value == null ? 'нет данных' : fmtMbps(value) + ' Мбит/с'}`),
     h('div.speed-name.r-' + route, title),
@@ -355,31 +374,153 @@ function speedVerdict(r) {
 function speedCard() {
   const run = store.speedRun;
   const r = store.view.speed;
-  const btn = h('button.btn.small', { disabled: !!run, onclick: runSpeedTest },
+  const next = speedProfile();
+  const btn = h('button.btn.small', { disabled: !!run, onclick: () => runSpeedTest() },
     icon('speed'), run ? 'Проверяю…' : r ? 'Проверить снова' : 'Проверить');
   let foot;
   if (run) foot = 'Около 25 секунд. На каждый замер скачивается до 200 МБ.';
   else if (r) foot = [speedVerdict(r), `Проверено ${fmtAgo(r.at)}.`].filter(Boolean).join(' ');
-  else foot = 'Сравнит скорость загрузки и пинг без VPN и через выбранный сервер.';
+  else foot = 'Сравнит скорость загрузки и пинг без VPN и через сервер.';
   const directPart = run ? run.direct : r && r.direct;
   const vpnPart = run ? null : r && r.vpn;
+  // under the VPN sign: the server being measured, the one last measured, or the one the next run takes
+  const vpnName = run ? run.profile : r && r.vpn ? r.profile : next && next.name;
+  // what the next run uses; both rows open the same settings
+  const opt = (label, value) => h('button.speed-opt', { type: 'button', disabled: !!run, onclick: speedDialog },
+    h('span.speed-opt-label', label), h('span.speed-opt-value', { title: value }, value), icon('chevron'));
   const el = h('section.panel.card.speed-card', { 'aria-busy': run ? 'true' : 'false' },
     h('div.card-head', h('h2.card-title', 'Скорость'), btn),
-    h('div.speed-cols', speedColumn('direct', directPart, run), speedColumn('vpn', vpnPart, run)),
+    h('div.speed-cols', speedColumn('direct', directPart, run, null), speedColumn('vpn', vpnPart, run, vpnName)),
+    h('div.speed-setup',
+      opt('Тестовый сервер', targetSummary()),
+      opt('Через сервер', next ? next.name : 'не выбран')),
     h('p.card-foot', foot));
   refs.speed = el;
   return el;
 }
 
+const REGIONS = [['any', 'По всему миру'], ['ru', 'Россия'], ['eu', 'Европа'], ['us', 'США']];
+
+/** Which test servers to use and through which server to measure. */
+function speedDialog() {
+  const sp = speedPrefs();
+  const builtin = store.view.speed_targets;
+  const custom = sp.custom.map((c) => ({ ...c }));
+  const known = (id) => builtin.some((t) => t.id === id) || custom.some((c) => c.id === id);
+  const picked = new Set(sp.targets.filter(known));
+  let manual = picked.size > 0;
+
+  const list = h('div.speed-pick');
+  const note = h('p.field-note');
+  const save = h('button.btn.primary', { onclick: submit }, 'Сохранить');
+  const name = h('input.input', { placeholder: 'Название', 'aria-label': 'Название своего сервера', maxLength: 40 });
+  const url = h('input.input.grow', { placeholder: 'https://example.com/100MB.bin', 'aria-label': 'Адрес большого файла', inputMode: 'url' });
+  const through = h('select.select#speed-through',
+    h('option', { value: '' }, activeProfile() ? `Выбранный сервер (сейчас «${activeProfile().name}»)` : 'Выбранный сервер'),
+    profileOptions());
+  through.value = sp.profile && profile(sp.profile) ? sp.profile : '';
+
+  const option = (id, title, place, extra) => h('label.speed-target',
+    h('input', {
+      type: 'checkbox', checked: picked.has(id),
+      onchange: (e) => { if (e.target.checked) picked.add(id); else picked.delete(id); paintNote(); },
+    }),
+    h('span.speed-target-name', title), place && h('span.speed-target-place', place), extra);
+
+  function paintNote() {
+    const auto = builtin.filter((t) => t.auto).map((t) => t.name);
+    if (!manual) note.textContent = `ReTunl сам берёт тот сервер, который отвечает быстрее: ${auto.join(', ')}.`;
+    else if (!picked.size) note.textContent = 'Отметьте хотя бы один сервер.';
+    else if (picked.size === 1) note.textContent = 'Оба замера, без VPN и через сервер, пойдут на этот сервер.';
+    else note.textContent = 'Каждый замер возьмёт из отмеченных тот сервер, который отвечает быстрее.';
+    save.disabled = manual && !picked.size;
+  }
+
+  function paint() {
+    const groups = REGIONS
+      .map(([key, title]) => [title, builtin.filter((t) => t.region === key)])
+      .filter(([, items]) => items.length)
+      .map(([title, items]) => h('div.speed-group',
+        h('div.speed-group-title', title),
+        items.map((t) => option(t.id, t.name, [t.city, t.country].filter(Boolean).join(', ') || 'ближайший узел сети'))));
+    if (custom.length) {
+      groups.push(h('div.speed-group',
+        h('div.speed-group-title', 'Свои серверы'),
+        custom.map((c) => option(c.id, c.name, c.url.replace(/^https?:\/\//, ''),
+          h('button.icon-btn.small', {
+            type: 'button', 'aria-label': 'Удалить «' + c.name + '»', title: 'Удалить',
+            onclick: (e) => { e.preventDefault(); custom.splice(custom.indexOf(c), 1); picked.delete(c.id); paint(); },
+          }, icon('trash'))))));
+    }
+    list.hidden = !manual;
+    list.replaceChildren(...groups);
+    paintNote();
+  }
+
+  function addOwn() {
+    const link = url.value.trim();
+    let host;
+    try {
+      const u = new URL(link);
+      if (!/^https?:$/.test(u.protocol)) throw new Error('scheme');
+      host = u.host;
+    } catch {
+      errorToast('Адрес должен быть ссылкой на файл: https://example.com/100MB.bin');
+      url.focus();
+      return;
+    }
+    const own = { id: 'own-' + Math.random().toString(36).slice(2, 10), name: name.value.trim() || host, url: link };
+    custom.push(own);
+    picked.add(own.id);
+    name.value = '';
+    url.value = '';
+    manual = true;
+    mode.replaceWith(mode = modeSeg());
+    paint();
+  }
+  url.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addOwn(); } });
+
+  const modeSeg = () => seg([{ value: 'auto', label: 'Авто' }, { value: 'manual', label: 'Выбрать серверы' }],
+    manual ? 'manual' : 'auto', (v) => { manual = v === 'manual'; paint(); }, { label: 'Тестовый сервер' });
+  let mode = modeSeg();
+
+  async function submit() {
+    const patch = { speed: { targets: manual ? [...picked] : [], custom, profile: through.value || null } };
+    const ok = await act(() => invoke('update_settings', { patch }));
+    if (ok !== undefined) dl.close();
+  }
+
+  const dl = dialog({
+    title: 'Проверка скорости',
+    body: h('div.form-stack.speed-form',
+      h('div.field',
+        h('span.field-label', 'Тестовый сервер'),
+        h('p.field-note', 'С него скачивается файл во время замера.'),
+        mode, note, list),
+      h('div.field.speed-own',
+        h('span.field-label', 'Свой сервер'),
+        h('div.speed-own-row', name, url, h('button.btn', { type: 'button', onclick: addOwn }, icon('plus'), 'Добавить')),
+        h('p.field-note', 'Ссылка на большой файл, от 50 МБ: например, на вашем собственном сервере.')),
+      h('div.field',
+        h('label.field-label', { htmlFor: 'speed-through' }, 'Через какой сервер мерить'),
+        through,
+        h('p.field-note', 'Замер «Через VPN» идёт через него, даже когда подключён другой.'))),
+    actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), save],
+  });
+  paint();
+}
+
 let ticker = null;
-async function runSpeedTest() {
+/** `through`: a server id for this run only (the server's own menu asks for it). */
+async function runSpeedTest(through) {
   if (store.speedRun) return;
-  store.speedRun = { stage: 'direct', step: 'pick', mbps: null, server: null, t0: Date.now(), direct: null };
+  const via = (through && profile(through)) || speedProfile();
+  store.speedRun = { stage: 'direct', step: null, mbps: null, server: null, t0: Date.now(), direct: null, profile: via ? via.name : null };
   overview.onSpeed();
   // the ring keeps moving between progress events
   ticker = setInterval(() => overview.onSpeed(), 250);
   try {
-    store.view.speed = await invoke('speed_test');
+    store.view.speed = await invoke('speed_test', { profile: through || null });
   } catch (e) {
     errorToast(e);
   } finally {
@@ -387,6 +528,13 @@ async function runSpeedTest() {
     store.speedRun = null;
     overview.onSpeed();
   }
+}
+
+/** Open the overview and measure through the server `id`, whatever the speed settings say. */
+export function speedTestThrough(id) {
+  if (store.speedRun) return;
+  store.navigate('overview');
+  runSpeedTest(id);
 }
 
 /** A `speed-progress` event from the backend. */
