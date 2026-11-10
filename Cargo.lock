@@ -4166,7 +4166,7 @@ dependencies = [
 
 [[package]]
 name = "retunl"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "retunl-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "argon2 0.5.3",
  "base64 0.22.1",
@@ -5435,7 +5435,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-retunl-vpn"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
