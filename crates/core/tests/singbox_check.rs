@@ -115,7 +115,7 @@ fn run_briefly(bin: &Path, dir: &Path, name: &str, config: &serde_json::Value) {
 
 fn profile(id: &str, link: &str) -> Profile {
     let p = parse_link(link).unwrap_or_else(|e| panic!("{link}: {e}"));
-    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: None }
+    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None }
 }
 
 // Real-looking keys so sing-box accepts them.
@@ -262,7 +262,7 @@ fn interface_profile_and_wg_conf() {
     );
     let wg = wgconf::parse(&conf, "AWG compatible").unwrap();
     let mut d = AppData::default();
-    d.profiles.push(Profile { id: "wg".into(), name: wg.profile.name, outbound: wg.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: None });
+    d.profiles.push(Profile { id: "wg".into(), name: wg.profile.name, outbound: wg.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None });
     d.profiles.push(Profile {
         id: "if".into(),
         name: "AmneziaVPN".into(),
@@ -271,6 +271,7 @@ fn interface_profile_and_wg_conf() {
         link: None,
         created_at: 0,
         wiresock: None,
+        cisco: None,
     });
     d.settings.active_profile = Some("wg".into());
     d.rules.push(Rule {
@@ -319,7 +320,7 @@ fn amneziawg_and_xhttp_need_sing_box_lx() {
     let conf = "[Interface]\nPrivateKey = OOrcz46udUCWEuue7YueYT6OGhchZ91v0NqtRu+W2FI=\nAddress = 10.8.1.2/32\nJc = 3\nJmin = 10\nJmax = 40\nS1 = 20\nS2 = 30\nS3 = 16\nS4 = 12\nHeaderProtectionKey = KIKOZNzj+d+G5Gw84nfLm49oM/f+xMoThA4AEOqyZkc=\nRandomTrailers = on\n\n[Peer]\nPublicKey = xqz8eGLSa0P5JHkSTGnKoczKZjmonaUDbbx8bUqRjWw=\nEndpoint = 203.0.113.7:39000\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 22-30\n";
     let awg = wgconf::parse(conf, "AWG 3.1").unwrap().profile;
     let mut d = AppData::default();
-    d.profiles.push(Profile { id: "awg".into(), name: awg.name, outbound: awg.outbound, subscription: None, link: None, created_at: 0, wiresock: None });
+    d.profiles.push(Profile { id: "awg".into(), name: awg.name, outbound: awg.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None });
     d.profiles.push(profile("xh", "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&type=xhttp&path=%2Fxh&mode=auto&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#XHTTP"));
     d.settings.active_profile = Some("awg".into());
     d.rules.push(Rule { id: "r".into(), name: "curl".into(), enabled: true, apps: vec!["curl.exe".into()], route: Route::Profile { id: "xh".into() }, ..Default::default() });
@@ -352,7 +353,7 @@ fn wiresock_configs() {
     );
     let wg = wgconf::parse(&conf, "WS").unwrap();
     let mut d = AppData::default();
-    d.profiles.push(Profile { id: "ws".into(), name: wg.profile.name, outbound: wg.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: wg.wiresock });
+    d.profiles.push(Profile { id: "ws".into(), name: wg.profile.name, outbound: wg.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: wg.wiresock, cisco: None });
     d.profiles.push(profile("nl", &format!("vless://id@nl.example.com:443?security=reality&pbk={REALITY_PBK}&sni=www.microsoft.com#NL")));
     d.settings.active_profile = Some("ws".into());
     d.rules.push(Rule { id: "r".into(), name: "Telegram".into(), enabled: true, apps: vec!["Telegram.exe".into()], route: Route::Profile { id: "nl".into() }, ..Default::default() });

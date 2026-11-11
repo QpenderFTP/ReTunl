@@ -6,7 +6,7 @@ use crate::awg::CoreKind;
 
 fn profile(id: &str, link: &str) -> Profile {
     let p = parse_link(link).unwrap();
-    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: Some(link.into()), created_at: 0, wiresock: None }
+    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: Some(link.into()), created_at: 0, wiresock: None, cisco: None }
 }
 
 fn opts() -> BuildOptions {
@@ -190,6 +190,33 @@ fn wireguard_goes_to_endpoints_and_proxy_mode() {
     assert_eq!(c["dns"]["strategy"], "prefer_ipv4");
     // no DNS hijack rule without TUN
     assert!(c["route"]["rules"].as_array().unwrap().iter().all(|r| r.get("protocol").is_none()));
+}
+
+#[test]
+fn wireguard_own_networks_go_to_it() {
+    let mut d = base();
+    let conf = "[Interface]\nAddress = 172.16.6.8/32\nPrivateKey = cHJpdg==\n\n[Peer]\nPublicKey = cHVi\nEndpoint = router.example.net:41495\nAllowedIPs = 172.16.6.0/24\n";
+    let wg = crate::wgconf::parse(conf, "WorkTest").unwrap().profile;
+    d.profiles.push(Profile { id: "wg".into(), name: wg.name, outbound: wg.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None });
+    d.settings.final_route = Route::Direct;
+    let mut yt = rule("YouTube", Route::Profile { id: "wg".into() });
+    yt.domains = vec!["youtube.com".into()];
+    d.rules.push(yt);
+    let c = build(&d, &opts()).unwrap().config;
+    let rules = c["route"]["rules"].as_array().unwrap();
+    let own = rules.iter().position(|r| r["ip_cidr"] == json!(["172.16.6.0/24"])).expect("own network rule");
+    assert_eq!(rules[own]["outbound"], "WorkTest");
+    let lan = rules.iter().position(|r| r["ip_is_private"] == true).unwrap();
+    assert!(own < lan, "before the local network rule: {rules:?}");
+    // the tunnel takes everything the rules send it
+    assert_eq!(c["endpoints"][0]["peers"][0]["allowed_ips"], json!(["0.0.0.0/0", "::/0"]));
+    // a server no rule uses brings no rule
+    d.rules.clear();
+    let c = build(&d, &opts()).unwrap().config;
+    assert!(c["route"]["rules"].as_array().unwrap().iter().all(|r| r.get("ip_cidr").is_none()));
+    let refs: Vec<&Profile> = d.profiles.iter().filter(|p| p.id == "wg").collect();
+    let probe = build_probe(&refs, &d.settings, 23456, "x", CoreKind::Official).unwrap();
+    assert_eq!(probe["endpoints"][0]["peers"][0]["allowed_ips"], json!(["0.0.0.0/0", "::/0"]));
 }
 
 #[test]

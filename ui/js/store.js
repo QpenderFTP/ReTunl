@@ -74,12 +74,15 @@ const TRANSPORT = {
 export const coreNeed = (p) => (store.view.core.needs || {})[p.id];
 export const hasLx = () => !!store.view.core.lx_path;
 export const isWindows = () => !!store.view && store.view.platform === 'windows';
+/** Cisco Secure Client's adapter: ReTunl logs in to Cisco with vpncli (Windows). */
+export const isCisco = (p) => !!(p && p.cisco);
 /** Windows: WireSock VPN Client runs this WireGuard server, sing-box only reaches it. */
 export const viaWireSock = (p) => isWindows() && !!(p && p.wiresock && p.wiresock.enabled);
 /** The server runs only on sing-box-lx, and ReTunl has none. */
 export const needsLx = (p) => coreNeed(p) === 'extended' && !hasLx() && !viaWireSock(p);
 
 export function protoParts(p) {
+  if (isCisco(p)) return { base: 'Cisco Secure Client', extra: '' };
   const o = p.outbound || {};
   const base = o.type === 'wireguard' && coreNeed(p) ? 'AmneziaWG' : PROTO[o.type] || o.type || '?';
   const extra = [];
@@ -93,6 +96,7 @@ export function protoParts(p) {
 const hostPort = (host, port) => (host && host.includes(':') ? `[${host}]` : host || '') + (port ? ':' + port : '');
 
 export function addressOf(p) {
+  if (isCisco(p)) return p.cisco.host;
   const o = p.outbound || {};
   if (o.type === 'direct') return o.bind_interface || '';
   if (o.type === 'wireguard') {
@@ -270,7 +274,8 @@ export async function connect() {
   try {
     await invoke('connect');
   } catch (e) {
-    if (e !== 'need_admin') errorToast(e);
+    // Cisco Secure Client wants a login: the «cisco-login» event opens it
+    if (e !== 'need_admin' && !String(e).startsWith('cisco_login:')) errorToast(e);
   }
 }
 

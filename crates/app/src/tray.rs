@@ -82,7 +82,7 @@ fn toggle_connection(app: &AppHandle) {
         if state.engine.is_active() {
             state.engine.stop().await;
         } else if let Err(e) = state.connect().await {
-            if crate::api::is_need_admin(&e) {
+            if crate::api::is_need_admin(&e) || crate::engine::is_cisco_login(&e) {
                 show_main(&app);
             }
         }

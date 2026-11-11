@@ -493,6 +493,7 @@ mod tests {
             link: None,
             created_at: 0,
             wiresock: None,
+            cisco: None,
         };
         let r = run(&paths, &Settings::default(), Some(profile), None, |_| {}).await.unwrap();
         let _ = server.kill();

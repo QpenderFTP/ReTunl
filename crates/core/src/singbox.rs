@@ -11,6 +11,7 @@ use crate::dns;
 use crate::model::*;
 use crate::rulesets::{self, RuleSetKind, RuleSetSource};
 use crate::util::{is_ip, re_escape, strip_suffix_ci, Os};
+use crate::wgconf;
 
 pub const TAG_DIRECT: &str = "direct";
 pub const DNS_DIRECT: &str = "dns-direct";
@@ -73,9 +74,8 @@ impl WireSockLink {
     }
 }
 
-/// The server that goes through WireSock: one switched to it that some route
-/// uses, the selected server first. WireSock runs one tunnel at a time.
-pub fn wiresock_profile(data: &AppData) -> Option<&Profile> {
+/// Ids of the servers some route uses: the default one or an enabled rule.
+fn used_ids(data: &AppData) -> Vec<&str> {
     let mut ids: Vec<&str> = Vec::new();
     let routes = std::iter::once(&data.settings.final_route)
         .chain(data.rules.iter().filter(|r| r.enabled && !r.is_empty()).map(|r| &r.route));
@@ -86,6 +86,19 @@ pub fn wiresock_profile(data: &AppData) -> Option<&Profile> {
             Route::Direct | Route::Block => {}
         }
     }
+    ids
+}
+
+/// The servers some route uses, in the order of the list.
+pub fn used_profiles(data: &AppData) -> Vec<&Profile> {
+    let ids = used_ids(data);
+    data.profiles.iter().filter(|p| ids.contains(&p.id.as_str())).collect()
+}
+
+/// The server that goes through WireSock: one switched to it that some route
+/// uses, the selected server first. WireSock runs one tunnel at a time.
+pub fn wiresock_profile(data: &AppData) -> Option<&Profile> {
+    let ids = used_ids(data);
     let used = |p: &&Profile| p.uses_wiresock() && ids.contains(&p.id.as_str());
     data.active_profile().filter(used).or_else(|| data.profiles.iter().find(used))
 }
@@ -727,6 +740,15 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
     if mode == InboundMode::Tun {
         rules.push(json!({"protocol": "dns", "action": "hijack-dns"}));
     }
+    // A WireGuard server's own networks (AllowedIPs = 172.16.6.0/24) go to it,
+    // before the local network rule keeps these private addresses home
+    for p in &data.profiles {
+        let Some(tag) = ctx.tag_of.get(&p.id) else { continue };
+        let nets = wgconf::own_networks(&p.outbound);
+        if !nets.is_empty() {
+            rules.push(json!({"ip_cidr": nets, "action": "route", "outbound": tag}));
+        }
+    }
     if s.bypass_lan {
         rules.push(json!({"ip_is_private": true, "action": "route", "outbound": TAG_DIRECT}));
     }
@@ -839,6 +861,7 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
                 p.name
             ));
         }
+        wgconf::open_peer(&mut ob);
         ob.insert("tag".into(), json!(tag));
         tags.insert(tag.clone(), p.id.clone());
         if p.is_endpoint() {
@@ -1000,6 +1023,7 @@ pub fn build_probe(profiles: &[&Profile], settings: &Settings, port: u16, secret
         if core == CoreKind::Official {
             awg::strip_for_official(&mut ob);
         }
+        wgconf::open_peer(&mut ob);
         ob.insert("tag".into(), json!(p.id));
         if p.is_endpoint() {
             endpoints.push(Value::Object(ob));

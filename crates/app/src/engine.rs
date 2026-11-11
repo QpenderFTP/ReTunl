@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::blocks::{BlockStats, Blocks};
+use crate::cisco;
 use crate::clash::Clash;
 use crate::fetch;
 use crate::paths::Paths;
@@ -23,6 +24,9 @@ use crate::wiresock;
 
 /// Error text meaning "TUN needs admin rights" — the UI offers a restart.
 pub const NEED_ADMIN: &str = "need_admin";
+/// Error text beginning "Cisco Secure Client is not logged in": then `:<server id>`.
+/// The UI asks for the password and connects again.
+pub const CISCO_LOGIN: &str = "cisco_login";
 const LOG_CAPACITY: usize = 4000;
 /// The macOS core log file is emptied once it grows past this.
 const LOG_FILE_LIMIT: u64 = 8 << 20;
@@ -132,6 +136,8 @@ struct Inner {
     wiresock: Option<wiresock::Tunnel>,
     /// WireSock stopped on its own: the connection ends with this.
     wiresock_error: Option<String>,
+    /// Log out of Cisco Secure Client when the user disconnects.
+    cisco_logout: bool,
 }
 
 type Listener = Box<dyn Fn(Status) + Send + Sync>;
@@ -172,6 +178,7 @@ impl Engine {
                 end_error: None,
                 wiresock: None,
                 wiresock_error: None,
+                cisco_logout: false,
             }),
             logs: Mutex::new((VecDeque::with_capacity(LOG_CAPACITY), 1)),
             tail: Mutex::new(None),
@@ -345,6 +352,9 @@ impl Engine {
             self.blocks.end();
             if e == NEED_ADMIN {
                 self.set_status(Status::new(Phase::Stopped));
+            } else if is_cisco_login(e) {
+                self.log_app("INFO", "Cisco Secure Client не подключён: сначала войдите в него");
+                self.set_status(Status::new(Phase::Stopped));
             } else {
                 self.log_app("ERROR", e);
                 let mut s = Status::new(Phase::Failed);
@@ -353,6 +363,32 @@ impl Engine {
             }
         }
         r
+    }
+
+    /// Servers that are Cisco Secure Client need it logged in: their traffic
+    /// goes into its adapter, found anew each time. Gives whether to log out
+    /// of Cisco when the user disconnects.
+    async fn check_cisco(&self, data: &mut AppData) -> Result<bool, String> {
+        let used: Vec<String> = singbox::used_profiles(data).iter().filter(|p| p.is_cisco()).map(|p| p.id.clone()).collect();
+        let Some(first) = used.first() else { return Ok(false) };
+        if !cfg!(windows) {
+            return Err("Cisco Secure Client ReTunl подключает только в Windows.".into());
+        }
+        self.set_step("Проверяю Cisco Secure Client…");
+        let status = tokio::task::spawn_blocking(cisco::status).await.map_err(|e| e.to_string())??;
+        if status.state != cisco::State::Connected {
+            return Err(format!("{CISCO_LOGIN}:{first}"));
+        }
+        let adapter = status.adapter.ok_or("Cisco Secure Client подключён, но ReTunl не нашёл его сетевой адаптер.")?;
+        self.log_app("INFO", &format!("Cisco Secure Client подключён, его адаптер — «{adapter}»"));
+        let mut logout = false;
+        for p in data.profiles.iter_mut().filter(|p| used.contains(&p.id)) {
+            logout |= p.cisco.as_ref().is_some_and(|c| c.disconnect);
+            if let Some(o) = p.outbound.as_object_mut() {
+                o.insert("bind_interface".into(), Value::from(adapter.clone()));
+            }
+        }
+        Ok(logout)
     }
 
     /// Strict route on Windows blocks DNS port 53 outside the tunnel, and on
@@ -408,6 +444,7 @@ impl Engine {
             ));
         }
         let direct_dns_tls = self.direct_dns_tls(&data).await;
+        let cisco_logout = self.check_cisco(&mut data).await?;
         // WireSock is checked before the config: the config points at its helper
         let wiresock_plan = match singbox::wiresock_profile(&data).filter(|_| cfg!(windows)) {
             Some(p) => {
@@ -495,6 +532,7 @@ impl Engine {
             g.wiresock_error = None;
         }
 
+        self.lock().cisco_logout = cisco_logout;
         let tun = mode == InboundMode::Tun;
         self.set_step(match mode {
             InboundMode::Tun if cfg!(target_os = "android") => "Включаю VPN…",
@@ -743,6 +781,19 @@ impl Engine {
         self.set_status(s);
         let me = self.clone();
         let _ = tokio::task::spawn_blocking(move || me.terminate(pid)).await;
+        self.cisco_logout().await;
+    }
+
+    /// Log out of Cisco Secure Client if its server asks for that.
+    async fn cisco_logout(&self) {
+        if !std::mem::take(&mut self.lock().cisco_logout) {
+            return;
+        }
+        self.log_app("INFO", "Выхожу из Cisco Secure Client");
+        match tokio::task::spawn_blocking(cisco::logout).await.map_err(|e| e.to_string()) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) | Err(e) => self.log_app("WARN", &format!("Не удалось выйти из Cisco Secure Client: {e}")),
+        }
     }
 
     /// Graceful stop (Ctrl+Break, or the stop file on macOS), then kill after a few seconds.
@@ -782,6 +833,9 @@ impl Engine {
         // the watcher may not have got to it before the app exits
         let tunnel = self.lock().wiresock.take();
         drop(tunnel);
+        if std::mem::take(&mut self.lock().cisco_logout) {
+            let _ = cisco::logout();
+        }
         self.blocks.save();
     }
 
@@ -922,6 +976,11 @@ fn describe_route(data: &AppData) -> Option<String> {
         Route::Profile { id } => name(id),
         Route::Direct | Route::Block => data.active_profile().map(|p| p.name.clone()),
     }
+}
+
+/// The engine stopped because Cisco Secure Client wants a login.
+pub fn is_cisco_login(e: &str) -> bool {
+    e.strip_prefix(CISCO_LOGIN).is_some_and(|rest| rest.starts_with(':'))
 }
 
 fn mode_label(m: InboundMode) -> &'static str {
@@ -1235,6 +1294,7 @@ mod tests {
             link: None,
             created_at: 0,
             wiresock: Some(ws),
+            cisco: None,
         });
         data.settings.active_profile = Some("ws".into());
         if tun {

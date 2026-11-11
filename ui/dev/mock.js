@@ -21,6 +21,7 @@
         outbound: { type: 'vmess', server: 'de.example.net', server_port: 443, uuid: '…', transport: { type: 'ws', path: '/ws' }, tls: { enabled: true } } },
       { id: 'p4', name: 'Домашний WireGuard', outbound: { type: 'wireguard', address: ['10.8.0.2/32'], private_key: '…', peers: [{ address: '203.0.113.7', port: 51820, public_key: '…', allowed_ips: ['0.0.0.0/0'] }] } },
       { id: 'p5', name: 'AmneziaVPN', outbound: { type: 'direct', bind_interface: 'AmneziaVPN' } },
+      { id: 'p8', name: 'Работа', outbound: { type: 'direct', bind_interface: 'Ethernet 3' }, cisco: { host: 'vpn.company.ru', group: 'Staff', username: 'ivanov', disconnect: true } },
       { id: 'p6', name: 'Амстердам AmneziaWG 3.1', outbound: { type: 'wireguard', address: ['10.9.0.2/32'], private_key: '…', jc: 4, jmin: 10, jmax: 50, s1: 12, s2: 34, h1: '100000-100500', i1: '<b 0xc6000000>', peers: [{ address: '198.51.100.24', port: 34567, public_key: '…', allowed_ips: ['0.0.0.0/0'] }] } },
       { id: 'p7', name: 'Швеция XHTTP', subscription: 's1', link: 'vless://…?type=xhttp',
         outbound: { type: 'vless', server: 'se.example.net', server_port: 443, uuid: '…', transport: { type: 'xhttp', path: '/x', mode: 'auto' }, tls: { enabled: true, server_name: 'se.example.net' } } },
@@ -36,6 +37,7 @@
       { id: 'r4', name: 'Российские сайты', enabled: true, match_all: false, apps: [], domains: ['ru', 'su', 'xn--p1ai'], ips: [], ports: [], rule_sets: ['geosite-category-ru', 'geoip-ru'], route: { kind: 'direct' }, preset: 'ru-direct' },
       { id: 'r5', name: 'Игры напрямую', enabled: true, match_all: false, apps: ['C:\\Program Files (x86)\\Steam\\'], domains: [], ips: [], ports: [], rule_sets: [], route: { kind: 'direct' } },
       { id: 'r6', name: 'Реклама и трекеры', enabled: true, match_all: false, apps: [], domains: [], ips: [], ports: [], rule_sets: ['geosite-category-ads-all'], route: { kind: 'block' }, preset: 'ads' },
+      { id: 'r8', name: 'Рабочие сайты через Cisco', enabled: true, match_all: false, apps: [], domains: ['company.ru', 'jira.company.ru'], ips: [], ports: [], rule_sets: [], route: { kind: 'profile', id: 'p8' } },
       { id: 'r7', name: 'YouTube только в Chrome', enabled: false, match_all: true, apps: ['chrome.exe'], domains: ['youtube.com', 'googlevideo.com'], ips: [], ports: ['443'], rule_sets: [], route: { kind: 'proxy' } },
     ],
     presets: [
@@ -70,6 +72,14 @@
   let autostart = { enabled: false, elevated: false };
   // #mac: the macOS build (its texts, no restart as admin)
   const MAC = /mac/.test(location.hash);
+  // Cisco Secure Client: #nocisco — not installed, #ciscoon — already logged in
+  let ciscoState = /ciscoon/.test(location.hash) ? 'connected' : 'disconnected';
+  const usedIds = () => new Set([
+    ...(data.settings.active_profile && (data.settings.final_route.kind === 'proxy' || data.rules.some((r) => r.enabled && r.route.kind === 'proxy')) ? [data.settings.active_profile] : []),
+    ...data.rules.filter((r) => r.enabled && r.route.kind === 'profile').map((r) => r.route.id),
+    ...(data.settings.final_route.kind === 'profile' ? [data.settings.final_route.id] : []),
+  ]);
+  const usedCisco = () => data.profiles.filter((p) => p.cisco && usedIds().has(p.id));
   // #android: the phone build (packages instead of programs, the core built in)
   const ANDROID = /android/.test(location.hash);
   if (ANDROID) { core = 'встроено'; lxCore = 'встроено'; }
@@ -368,7 +378,7 @@
 
   const handlers = {
     ...adminHandlers,
-    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.3', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed, speed_targets: SPEED_TARGETS, wiresock: /nows/.test(location.hash) ? null : 'C:\\Program Files\\WireSock VPN Client\\bin\\wiresock-client.exe' }),
+    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.3', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed, speed_targets: SPEED_TARGETS, wiresock: /nows/.test(location.hash) ? null : 'C:\\Program Files\\WireSock VPN Client\\bin\\wiresock-client.exe', cisco: /nocisco/.test(location.hash) || MAC || ANDROID ? null : 'C:\\Program Files (x86)\\Cisco\\Cisco Secure Client\\vpncli.exe' }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });
@@ -400,6 +410,27 @@
     delete_subscription: ({ id: sid }) => { data.profiles = data.profiles.filter((p) => p.subscription !== sid); data.subscriptions = data.subscriptions.filter((s) => s.id !== sid); },
     set_active: ({ id: pid }) => { data.settings.active_profile = pid; },
     rename_profile: ({ id: pid, name }) => { data.profiles.find((p) => p.id === pid).name = name; },
+    save_cisco: ({ id: pid, name, cisco }) => {
+      if (!cisco.host) throw 'Укажите сервер Cisco: адрес или имя из списка в окне Cisco';
+      if (pid) {
+        const p = data.profiles.find((x) => x.id === pid);
+        p.name = name || 'Cisco'; p.cisco = cisco;
+        return pid;
+      }
+      const p = { id: id(), name: name || 'Cisco', outbound: { type: 'direct', bind_interface: 'Ethernet 3' }, cisco };
+      data.profiles.push(p);
+      return p.id;
+    },
+    cisco_status: async () => { await wait(300); return { state: ciscoState, adapter: 'Ethernet 3' }; },
+    cisco_login: async ({ password }) => {
+      log('info', 'Cisco: вхожу на vpn.company.ru как ivanov', 'app');
+      await wait(1400);
+      if (!password || password === 'wrong') throw 'Cisco Secure Client не подключился: Login failed. Проверьте логин, пароль и группу.';
+      ciscoState = 'connected';
+      log('info', 'Cisco Secure Client подключён', 'app');
+    },
+    cisco_logout: async () => { await wait(400); ciscoState = 'disconnected'; },
+    cisco_open: () => {},
     set_wiresock: ({ id: pid, wiresock, junk }) => {
       const p = data.profiles.find((x) => x.id === pid);
       if (wiresock.protocol && !wiresock.domain) throw 'Укажите домен для маскировки: популярный в вашей стране сайт, например ozon.ru';
@@ -483,6 +514,8 @@
     connect: async () => {
       if (!core) throw 'Не найдено ядро sing-box. Скачайте его на вкладке «Обзор» или в настройках.';
       if (data.settings.mode === 'tun' && /user/.test(location.hash) && !MAC) { emit('need-admin', null); throw 'need_admin'; }
+      const cs = usedCisco();
+      if (cs.length && ciscoState !== 'connected') { emit('cisco-login', cs[0].id); throw 'cisco_login:' + cs[0].id; }
       if (!data.profiles.length && data.settings.final_route.kind === 'proxy') { setStatus({ phase: 'failed', error: 'Не выбран сервер. Добавьте сервер на вкладке «Серверы».' }); throw status.error; }
       setStatus({ phase: 'starting', step: 'Скачиваю списки правил', error: null });
       log('info', 'подключение: ' + (data.settings.mode === 'tun' ? 'виртуальный адаптер' : 'системный прокси'), 'app');
@@ -504,6 +537,7 @@
     },
     disconnect: async () => {
       if (status.phase === 'stopped') return;
+      if (usedCisco().some((p) => p.cisco.disconnect)) ciscoState = 'disconnected';
       setStatus({ phase: 'stopping' });
       await wait(500);
       log('info', 'sing-box stopped', 'app');

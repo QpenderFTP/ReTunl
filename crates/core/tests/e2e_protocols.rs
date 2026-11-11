@@ -201,7 +201,7 @@ fn traffic_flows_through_every_protocol() {
         .enumerate()
         .map(|(i, l)| {
             let p = parse_link(l).unwrap_or_else(|e| panic!("{l}: {e}"));
-            Profile { id: format!("p{i}"), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: None }
+            Profile { id: format!("p{i}"), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None }
         })
         .collect();
     let refs: Vec<&Profile> = profiles.iter().collect();
@@ -286,7 +286,7 @@ fn amneziawg_through_sing_box_lx() {
     .map(|(name, text)| {
         let w = retunl_core::wgconf::parse(&text, name).unwrap();
         assert_eq!(w.profile.outbound["type"], "wireguard");
-        Profile { id: name.into(), name: name.into(), outbound: w.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: None }
+        Profile { id: name.into(), name: name.into(), outbound: w.profile.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None }
     })
     .collect();
     for p in &profiles {

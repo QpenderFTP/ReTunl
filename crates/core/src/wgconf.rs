@@ -20,6 +20,62 @@ pub fn looks_like_wg_conf(text: &str) -> bool {
     t.contains("[interface]") && t.contains("[peer]")
 }
 
+/// All addresses: what a server's only peer lets through in ReTunl.
+const EVERYWHERE: [&str; 2] = ["0.0.0.0/0", "::/0"];
+
+/// The only peer of a WireGuard server.
+fn only_peer(outbound: &Value) -> Option<&Value> {
+    if outbound.get("type").and_then(Value::as_str) != Some("wireguard") {
+        return None;
+    }
+    match outbound.get("peers").and_then(Value::as_array) {
+        Some(peers) if peers.len() == 1 => peers.first(),
+        _ => None,
+    }
+}
+
+/// The networks a WireGuard server is for, when that is not the whole
+/// internet: `AllowedIPs = 172.16.6.0/24` of a home router or an office.
+/// They go to that server whatever the rules say, private ones too. A file
+/// for all traffic gives none: `0.0.0.0/0`, `0.0.0.0/1, 128.0.0.0/1` or the
+/// internet without local networks in many pieces.
+pub fn own_networks(outbound: &Value) -> Vec<String> {
+    let Some(allowed) = only_peer(outbound).and_then(|p| p.get("allowed_ips")).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let nets: Vec<(String, f64)> = allowed
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|net| {
+            let net = crate::links::with_prefix(net.trim().to_string());
+            let (ip, len) = net.split_once('/')?;
+            let (ip, len) = (ip.parse::<std::net::IpAddr>().ok()?, len.parse::<u8>().ok()?);
+            let bits: u8 = if ip.is_ipv4() { 32 } else { 128 };
+            // the share of its family's addresses
+            (len <= bits).then(|| (net, 0.5f64.powi(len as i32)))
+        })
+        .collect();
+    let share = |v4: bool| nets.iter().filter(|(n, _)| n.contains('.') == v4).map(|(_, s)| s).sum::<f64>();
+    if share(true) >= 0.5 || share(false) >= 0.5 {
+        return Vec::new();
+    }
+    nets.into_iter().map(|(n, _)| n).collect()
+}
+
+/// Let the only peer of a WireGuard server take whatever the rules send it:
+/// its `allowed_ips` would drop the rest silently. What goes to the server
+/// is up to the rules, and [`own_networks`] keep going to it.
+pub fn open_peer(ob: &mut Map<String, Value>) {
+    if ob.get("type").and_then(Value::as_str) != Some("wireguard") {
+        return;
+    }
+    if let Some(Value::Array(peers)) = ob.get_mut("peers") {
+        if let [Value::Object(peer)] = peers.as_mut_slice() {
+            peer.insert("allowed_ips".into(), json!(EVERYWHERE));
+        }
+    }
+}
+
 pub fn parse(text: &str, name: &str) -> Result<WgImport, LinkError> {
     let mut section = String::new();
     let mut iface: Vec<(String, String)> = Vec::new();
@@ -112,6 +168,15 @@ pub fn parse(text: &str, name: &str) -> Result<WgImport, LinkError> {
     ob.extend(awg);
     if get(&iface, "dns").is_some() {
         warnings.push("DNS из файла не используется: ReTunl настраивает DNS сам.".into());
+    }
+    let own = own_networks(&Value::Object(ob.clone()));
+    if !own.is_empty() {
+        warnings.push(format!(
+            "В файле через сервер идут только {} (AllowedIPs). Эти адреса ReTunl всегда отправляет на этот сервер, \
+             а остальное — куда велят правила. Если сервер не выпускает в интернет, сайты через него не откроются: \
+             для них выберите другой сервер.",
+            own.join(", ")
+        ));
     }
     let default_name = if crate::awg::is_amnezia(&Value::Object(ob.clone())) { "AmneziaWG" } else { "WireGuard" };
     let name = if name.trim().is_empty() { default_name.to_string() } else { name.trim().to_string() };
@@ -288,11 +353,8 @@ pub fn wiresock_conf(p: &Profile, apps: &[&str], endpoint: Option<&str>) -> Resu
         }
     };
     line("Endpoint", endpoint);
-    let mut allowed = list(peer.get("allowed_ips"));
-    if allowed.is_empty() {
-        allowed = vec!["0.0.0.0/0".into(), "::/0".into()];
-    }
-    line("AllowedIPs", allowed.join(", "));
+    // WireSock takes only the helper, and all of it must go through
+    line("AllowedIPs", EVERYWHERE.join(", "));
     // AmneziaWG 3 allows a range ("22-30"): WireSock takes one number
     let keepalive = match peer.get("persistent_keepalive_interval") {
         Some(Value::Number(n)) => n.as_u64(),
@@ -423,6 +485,36 @@ fn static_key(conf_key: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// A router's file: only its own network goes through the tunnel.
+    const ROUTER: &str = "[Interface]\nAddress = 172.16.6.8/32\nPrivateKey = cAh=\nDNS = 172.16.6.1\n\n[Peer]\nPublicKey = vjY=\nEndpoint = router.example.net:41495\nAllowedIPs = 172.16.6.0/24\nPersistentKeepalive = 15\n";
+
+    #[test]
+    fn a_router_file_keeps_its_network() {
+        let imp = parse(ROUTER, "WorkTest").unwrap();
+        let o = &imp.profile.outbound;
+        assert_eq!(own_networks(o), vec!["172.16.6.0/24"]);
+        assert!(imp.warnings.iter().any(|w| w.contains("только 172.16.6.0/24")), "{:?}", imp.warnings);
+
+        let mut ob = o.as_object().unwrap().clone();
+        open_peer(&mut ob);
+        assert_eq!(ob["peers"][0]["allowed_ips"], json!(["0.0.0.0/0", "::/0"]));
+
+        let allowed = |list: &[&str]| json!({"type": "wireguard", "peers": [{"allowed_ips": list}]});
+        assert_eq!(own_networks(&allowed(&["10.0.0.0/8", "192.168.5.7", "fd00::/64"])), vec!["10.0.0.0/8", "192.168.5.7/32", "fd00::/64"]);
+        // files for all traffic
+        assert!(own_networks(&allowed(&["0.0.0.0/0", "::/0"])).is_empty());
+        assert!(own_networks(&allowed(&["0.0.0.0/1", "128.0.0.0/1"])).is_empty());
+        assert!(own_networks(&allowed(&["0.0.0.0/5", "8.0.0.0/7", "11.0.0.0/8", "12.0.0.0/6", "16.0.0.0/4", "32.0.0.0/3", "64.0.0.0/2", "128.0.0.0/3"])).is_empty());
+        assert!(own_networks(&allowed(&["10.0.0.0/8", "::/0"])).is_empty());
+        assert!(own_networks(&allowed(&[])).is_empty());
+        // two peers share the traffic by their AllowedIPs: left alone
+        let two = json!({"type": "wireguard", "peers": [{"allowed_ips": ["10.1.0.0/16"]}, {"allowed_ips": ["10.2.0.0/16"]}]});
+        assert!(own_networks(&two).is_empty());
+        let mut ob = two.as_object().unwrap().clone();
+        open_peer(&mut ob);
+        assert_eq!(ob["peers"][1]["allowed_ips"], json!(["10.2.0.0/16"]));
+    }
+
     const CONF: &str = "
 [Interface]
 PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
@@ -528,7 +620,7 @@ PersistentKeepalive = 25
 
     fn profile(conf: &str, ws: Option<WireSock>) -> Profile {
         let p = parse(conf, "x").unwrap().profile;
-        Profile { id: "p".into(), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: ws }
+        Profile { id: "p".into(), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: ws, cisco: None }
     }
 
     #[test]

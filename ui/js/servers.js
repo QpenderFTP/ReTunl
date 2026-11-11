@@ -6,7 +6,7 @@ import {
 } from './lib.js';
 import {
   store, D, S, act, refresh, protoParts, addressOf, importText, importClipboard, importFile, copyText,
-  reportImport, needsLx, downloadCore, paintCoreBar, isAndroid, isWindows, viaWireSock, scanQr,
+  reportImport, needsLx, downloadCore, paintCoreBar, isAndroid, isWindows, viaWireSock, isCisco, scanQr,
 } from './store.js';
 import { exportDialog } from './transfer.js';
 import { speedTestThrough } from './overview.js';
@@ -38,6 +38,7 @@ export const servers = {
       root.append(b);
       queueMicrotask(() => paintCoreBar(lxBar, 'extended'));
     }
+    if (isWindows() && d.profiles.some(isCisco)) queueMicrotask(() => loadCisco(false));
     if (!has && !d.subscriptions.length) {
       root.append(emptyState());
     } else {
@@ -76,7 +77,8 @@ function emptyState() {
       isAndroid() && h('button.btn', { onclick: scanQr }, icon('qr'), 'Сканировать QR-код'),
       h('button.btn', { onclick: addDialog }, icon('plus'), 'Ввести ссылку или подписку'),
       h('button.btn', { onclick: importFile }, icon('file'), 'Открыть файл…'),
-      !isAndroid() && h('button.btn', { onclick: adapterDialog }, icon('plug'), 'Через другой VPN-клиент')));
+      !isAndroid() && h('button.btn', { onclick: adapterDialog }, icon('plug'), 'Через другой VPN-клиент'),
+      isWindows() && h('button.btn', { onclick: () => ciscoDialog(null) }, icon('lock'), 'Cisco Secure Client')));
 }
 
 function group(sub, list) {
@@ -132,6 +134,7 @@ function row(p) {
       h('span.srv-name', p.name),
       h('span.srv-meta', h('span.srv-proto', base), extra && h('span', extra), h('span.srv-addr', addressOf(p)),
         viaWireSock(p) ? h('span.tag', { title: 'Этот сервер подключает WireSock VPN Client' }, 'WireSock') : null,
+        isCisco(p) ? ciscoTag() : null,
         needsLx(p) ? h('span.tag.warn', { title: 'Официальный sing-box не умеет этот сервер' }, 'нужно ядро sing-box-lx') : null)),
     latencyEl(store.view.latency[p.id]),
     h('button.icon-btn.srv-test', {
@@ -145,7 +148,10 @@ function row(p) {
         { label: 'Проверить скорость', icon: 'down', run: () => speedTestThrough(p.id) },
         { label: 'Переименовать', icon: 'edit', run: () => renameProfile(p) },
         isWindows() && p.outbound.type === 'wireguard' && { label: 'Подключать через WireSock…', icon: 'lock', run: () => wiresockDialog(p) },
-        { label: 'Настройки sing-box (JSON)', icon: 'file', run: () => editJson(p) },
+        isCisco(p) && { label: 'Войти в Cisco…', icon: 'plug', run: () => ciscoLogin(p) },
+        isCisco(p) && { label: 'Выйти из Cisco', icon: 'power', run: () => ciscoLogout() },
+        isCisco(p) && { label: 'Настройки Cisco…', icon: 'edit', run: () => ciscoDialog(p) },
+        !isCisco(p) && { label: 'Настройки sing-box (JSON)', icon: 'file', run: () => editJson(p) },
         p.link && { label: 'Копировать ссылку', icon: 'copy', run: () => copyText(p.link, 'Ссылка скопирована') },
         '-',
         { label: 'Удалить', icon: 'trash', danger: true, run: () => removeProfile(p) },
@@ -391,7 +397,8 @@ export function addDialog() {
         h('button.btn.small', { onclick: () => { dl.close(); importClipboard(); } }, icon('clipboard'), 'Вставить из буфера'),
         isAndroid() && h('button.btn.small', { onclick: () => { dl.close(); scanQr(); } }, icon('qr'), 'Сканировать QR-код'),
         h('button.btn.small', { onclick: () => { dl.close(); importFile(); } }, icon('file'), 'Открыть файл…'),
-        !isAndroid() && h('button.btn.small', { onclick: () => { dl.close(); adapterDialog(); } }, icon('plug'), 'Через другой VPN-клиент')),
+        !isAndroid() && h('button.btn.small', { onclick: () => { dl.close(); adapterDialog(); } }, icon('plug'), 'Через другой VPN-клиент'),
+        isWindows() && h('button.btn.small', { onclick: () => { dl.close(); ciscoDialog(null); } }, icon('lock'), 'Cisco Secure Client')),
     ],
     actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), submit],
   });
@@ -439,6 +446,170 @@ export async function adapterDialog() {
         h('div.adapter-addr', addrs.join(', ') || 'нет адресов')),
       btn);
   }));
+}
+
+// ---------- Cisco Secure Client ----------
+
+const CISCO_STATES = {
+  connected: ['Cisco: вход выполнен', ''],
+  connecting: ['Cisco: подключается', '.muted'],
+  disconnected: ['Cisco: не подключён', '.muted'],
+};
+
+/** The tag on a Cisco server: Cisco's state, filled in when it is known. */
+function ciscoTag() {
+  const t = h('span.tag.cisco-state', { title: 'Состояние Cisco Secure Client' });
+  paintCiscoTag(t);
+  return t;
+}
+
+function paintCiscoTag(t) {
+  if (!store.view.cisco) {
+    t.className = 'tag warn cisco-state';
+    t.textContent = 'Cisco не установлен';
+    return;
+  }
+  const st = store.cisco && CISCO_STATES[store.cisco.state];
+  t.className = 'tag cisco-state' + (st ? st[1].replace('.', ' ') : ' muted');
+  t.textContent = st ? st[0] : 'Cisco';
+}
+
+/** Ask vpncli for Cisco's state (at most every 15 seconds unless `force`). */
+async function loadCisco(force) {
+  if (!store.view.cisco) return;
+  if (!force && store.ciscoAt && Date.now() - store.ciscoAt < 15000) return;
+  store.ciscoAt = Date.now();
+  try {
+    store.cisco = await invoke('cisco_status');
+  } catch {
+    store.cisco = null;
+  }
+  document.querySelectorAll('.cisco-state').forEach(paintCiscoTag);
+}
+
+function ciscoSet(state) {
+  store.cisco = { ...(store.cisco || {}), state };
+  store.ciscoAt = Date.now();
+  document.querySelectorAll('.cisco-state').forEach(paintCiscoTag);
+}
+
+function ciscoMissing() {
+  return store.view.cisco ? null : banner('warn', 'Cisco Secure Client не установлен',
+    'Его выдаёт ваша организация. Установите программу, и ReTunl найдёт её сам. Сервер можно добавить заранее.');
+}
+
+/** Add a Cisco Secure Client server (`p` = null) or change one. */
+function ciscoDialog(p) {
+  const c = { host: '', group: '', username: '', disconnect: false, ...((p && p.cisco) || {}) };
+  const input = (id, value, attrs = {}) => h('input.input#' + id, { value, spellcheck: false, autocapitalize: 'off', maxLength: 200, ...attrs });
+  const name = input('cs-name', p ? p.name : 'Cisco', { maxLength: 80 });
+  const host = input('cs-host', c.host, { placeholder: 'vpn.company.ru' });
+  const grp = input('cs-group', c.group, { placeholder: 'Если сервер спрашивает' });
+  const user = input('cs-user', c.username, { autocomplete: 'username' });
+  const off = toggle(c.disconnect, () => {}, { id: 'cs-off' });
+  const err = h('p.form-error', { hidden: true });
+  const field = (id, label, ctl, note) => h('div.field', h('label.field-label', { htmlFor: id }, label), ctl, note && h('p.field-note', note));
+
+  const save = h('button.btn.primary', {
+    onclick: () => busy(save, async () => {
+      err.hidden = true;
+      const cisco = { host: host.value.trim(), group: grp.value.trim(), username: user.value.trim(), disconnect: off.checked };
+      try {
+        await invoke('save_cisco', { id: p ? p.id : null, name: name.value.trim(), cisco });
+        dl.close();
+        await refresh();
+        toast(p ? 'Настройки Cisco сохранены' : `«${name.value.trim() || 'Cisco'}» добавлен в серверы`);
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = errText(e);
+      }
+    }),
+  }, p ? 'Сохранить' : 'Добавить');
+
+  const dl = dialog({
+    title: p ? `Cisco для «${p.name}»` : 'Cisco Secure Client',
+    lead: 'ReTunl сам входит в Cisco Secure Client и отправляет в него трафик правил, которые ведут на этот сервер. Остальное идёт как раньше.',
+    body: h('div.form-stack.cisco-form',
+      ciscoMissing(),
+      field('cs-name', 'Название в ReTunl', name),
+      field('cs-host', 'Сервер Cisco', host, 'Адрес или название из списка в окне Cisco.'),
+      h('div.form-row.cisco-pair',
+        field('cs-group', 'Группа', grp),
+        field('cs-user', 'Логин', user)),
+      h('label.ws-on', { htmlFor: 'cs-off' },
+        h('span.ws-on-text', h('span.field-label', 'Выходить из Cisco при отключении ReTunl'),
+          h('span.field-note', 'Иначе Cisco остаётся подключённым.')),
+        off),
+      h('p.field-note', 'Пароль ReTunl спрашивает при каждом входе и нигде не хранит.'),
+      err),
+    actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), save],
+  });
+}
+
+/** Log in to Cisco Secure Client for `p`; `after` runs once logged in (a connection). */
+export function ciscoLogin(p, after) {
+  const c = p.cisco || {};
+  const pass = h('input.input#cs-pass', { type: 'password', autocomplete: 'current-password' });
+  const second = h('input.input#cs-second', { autocomplete: 'one-time-code', spellcheck: false, autocapitalize: 'off', placeholder: 'push или код' });
+  const err = h('p.form-error', { hidden: true });
+  const field = (id, label, ctl, note) => h('div.field', h('label.field-label', { htmlFor: id }, label), ctl, note && h('p.field-note', note));
+
+  const go = h('button.btn.primary', {
+    disabled: !store.view.cisco,
+    onclick: () => busy(go, async () => {
+      err.hidden = true;
+      try {
+        await invoke('cisco_login', { id: p.id, password: pass.value, second: second.value.trim() });
+        pass.value = '';
+        dl.close();
+        ciscoSet('connected');
+        toast('Вход в Cisco Secure Client выполнен');
+        if (after) after();
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = errText(e);
+        loadCisco(true);
+      }
+    }),
+  }, after ? 'Войти и подключить' : 'Войти');
+  pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); });
+  second.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); });
+
+  const inUi = h('button.btn', {
+    disabled: !store.view.cisco,
+    onclick: async () => {
+      try {
+        await invoke('cisco_open');
+        dl.close();
+        toast('Войдите в окне Cisco Secure Client', { detail: after ? 'Потом снова нажмите «Подключить» в ReTunl.' : '' });
+      } catch (e) {
+        errorToast(e);
+      }
+    },
+  }, icon('external'), 'Войти в окне Cisco');
+
+  const dl = dialog({
+    title: 'Вход в Cisco Secure Client',
+    lead: `Сервер ${c.host}${c.group ? ', группа ' + c.group : ''}${c.username ? ', логин ' + c.username : ''}. Пароль уйдёт только в Cisco и нигде не сохранится.`,
+    body: h('div.form-stack.cisco-form',
+      ciscoMissing(),
+      field('cs-pass', 'Пароль', pass),
+      field('cs-second', 'Второй пароль', second, 'Если сервер просит подтверждение: push для Duo или код из SMS или приложения.'),
+      h('p.field-note', 'Вход через браузер (SAML), по сертификату или с проверкой компьютера (ISE Posture) работает только в окне Cisco. Если окно Cisco открыто, на время входа ReTunl его закроет.'),
+      err),
+    actions: [inUi, h('button.btn', { onclick: () => dl.close() }, 'Отмена'), go],
+  });
+  setTimeout(() => pass.focus(), 50);
+}
+
+async function ciscoLogout() {
+  try {
+    await invoke('cisco_logout');
+    ciscoSet('disconnected');
+    toast('Выход из Cisco Secure Client выполнен');
+  } catch (e) {
+    errorToast(e);
+  }
 }
 
 function attachDrop(el) {

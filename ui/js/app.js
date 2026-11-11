@@ -5,10 +5,10 @@ import {
 } from './lib.js';
 import {
   store, on, emit, refresh, ST, D, activeProfile, toggleConnection, adminDialog, isOn, isAndroid,
-  isScanning, cancelScan,
+  isScanning, cancelScan, profile, connect,
 } from './store.js';
 import { overview, speedProgress } from './overview.js';
-import { servers } from './servers.js';
+import { servers, ciscoLogin } from './servers.js';
 import { myServers, loadHosts } from './hosts.js';
 import { rules } from './rules.js';
 import { activity } from './activity.js';
@@ -270,6 +270,8 @@ async function init() {
     if (st.phase === 'running') poll();
   });
   listen('need-admin', () => adminDialog());
+  // Cisco Secure Client wants a login before ReTunl can connect
+  listen('cisco-login', (id) => { const p = profile(id); if (p) ciscoLogin(p, connect); });
   listen('speed-progress', (p) => { speedProgress(p); if (store.page === 'overview') overview.onSpeed(); });
   listen('core-progress', (p) => { store.coreProgress = p; emit('core'); });
   listen('subscriptions-updating', (id) => { store.subUpdating.add(id); emit('data'); });

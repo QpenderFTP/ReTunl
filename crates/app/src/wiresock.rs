@@ -538,6 +538,7 @@ mod tests {
             link: None,
             created_at: 0,
             wiresock: None,
+            cisco: None,
         };
         let a = through_tunnel(p("a"), Some(&link));
         assert_eq!(a.outbound["type"], "socks");

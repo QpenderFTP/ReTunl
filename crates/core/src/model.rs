@@ -20,6 +20,25 @@ pub struct Profile {
     /// WireGuard through WireSock VPN Client (Windows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiresock: Option<WireSock>,
+    /// The adapter of Cisco Secure Client, which ReTunl logs in and out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cisco: Option<Cisco>,
+}
+
+/// A server that is Cisco Secure Client (AnyConnect) on Windows. ReTunl logs
+/// in through its command line (vpncli) and sends the traffic of its rules
+/// into Cisco's network adapter: the `outbound` is `direct` bound to it. The
+/// password is asked at each login and never kept.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct Cisco {
+    /// The VPN server: an address or a name from Cisco's own list.
+    pub host: String,
+    /// The group (connection profile) the server asks for; empty: it asks none.
+    pub group: String,
+    pub username: String,
+    /// Log out of Cisco when ReTunl disconnects.
+    pub disconnect: bool,
 }
 
 /// How a WireGuard server goes through WireSock VPN Client: WireSock masks
@@ -118,6 +137,11 @@ impl Profile {
                     .and_then(|p| p.parse().ok())
             })?;
         Some((host, port))
+    }
+
+    /// Cisco Secure Client's adapter.
+    pub fn is_cisco(&self) -> bool {
+        self.cisco.is_some() && self.is_interface()
     }
 
     /// A WireGuard server switched to WireSock.

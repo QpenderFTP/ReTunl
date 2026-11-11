@@ -11,7 +11,7 @@ use retunl_core::rulesets::{self, CatalogEntry};
 use retunl_core::singbox::{self, validate_rule, BuildOptions};
 use retunl_core::subscription::{self, ImportResult};
 use retunl_core::util::{new_id, now_unix};
-use retunl_core::{dns, wgconf, AppData, CustomPreset, Profile, Route, Rule, Settings, Subscription, WireSock};
+use retunl_core::{dns, wgconf, AppData, Cisco, CustomPreset, Profile, Route, Rule, Settings, Subscription, WireSock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -19,6 +19,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::blocks::BlockStats;
+use crate::cisco;
 use crate::engine::{LogLine, Poll, Status, NEED_ADMIN};
 use crate::probe::{self, Latency};
 use crate::speed::{self, SpeedResult};
@@ -79,6 +80,8 @@ pub struct View {
     speed_targets: Vec<speed::TargetInfo>,
     /// Windows: wiresock-client.exe of an installed WireSock VPN Client.
     wiresock: Option<String>,
+    /// Windows: vpncli.exe of an installed Cisco Secure Client.
+    cisco: Option<String>,
 }
 
 #[tauri::command]
@@ -107,6 +110,7 @@ pub fn get_state(st: St<'_>) -> View {
         speed: st.speed.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         speed_targets: speed::catalog(),
         wiresock: wiresock::find_client().map(|p| p.display().to_string()),
+        cisco: cisco::find().map(|c| c.cli.display().to_string()),
     }
 }
 
@@ -527,6 +531,90 @@ pub fn set_wiresock(st: St<'_>, id: String, wiresock: WireSock, junk: Junk) -> R
     })?;
     st.request_reload();
     Ok(())
+}
+
+// ---------- Cisco Secure Client ----------
+
+/// Add a Cisco Secure Client server, or change one (`id`). Gives its id.
+#[tauri::command]
+pub async fn save_cisco(st: St<'_>, id: Option<String>, name: String, cisco: Cisco) -> R<String> {
+    let c = Cisco {
+        host: cisco.host.trim().to_string(),
+        group: cisco.group.trim().to_string(),
+        username: cisco.username.trim().to_string(),
+        disconnect: cisco.disconnect,
+    };
+    if c.host.is_empty() {
+        return Err("Укажите сервер Cisco: адрес или имя из списка в окне Cisco".into());
+    }
+    if [&c.host, &c.group, &c.username].iter().any(|f| f.contains(['\r', '\n'])) {
+        return Err("Сервер, группа и логин пишутся в одну строку".into());
+    }
+    let name = match name.trim() {
+        "" => "Cisco".to_string(),
+        n => n.to_string(),
+    };
+    // the adapter is looked up again at each connection
+    let adapter = tokio::task::spawn_blocking(cisco::adapter).await.map_err(|e| e.to_string())?;
+    let id = st.mutate(|d| match id {
+        Some(id) => {
+            let p = d.profiles.iter_mut().find(|p| p.id == id).ok_or("Сервер не найден")?;
+            if !p.is_cisco() {
+                return Err("Это не сервер Cisco Secure Client".into());
+            }
+            p.name = name;
+            p.cisco = Some(c);
+            Ok(id)
+        }
+        None => {
+            let id = new_id();
+            d.profiles.push(Profile {
+                id: id.clone(),
+                name,
+                outbound: serde_json::json!({"type": "direct", "bind_interface": adapter.unwrap_or_else(|| "Cisco Secure Client".into())}),
+                subscription: None,
+                link: None,
+                created_at: now_unix(),
+                wiresock: None,
+                cisco: Some(c),
+            });
+            if d.settings.active_profile.as_ref().and_then(|a| d.profile(a)).is_none() {
+                d.settings.active_profile = Some(id.clone());
+            }
+            Ok(id)
+        }
+    })?;
+    st.request_reload();
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn cisco_status() -> R<cisco::Status> {
+    tokio::task::spawn_blocking(cisco::status).await.map_err(|e| e.to_string())?
+}
+
+/// Log in to Cisco Secure Client for server `id`. The password only passes through.
+#[tauri::command]
+pub async fn cisco_login(st: St<'_>, id: String, password: String, second: Option<String>) -> R<()> {
+    let c = st.snapshot().profile(&id).and_then(|p| p.cisco.clone()).ok_or("Сервер Cisco не найден")?;
+    let engine = st.engine.clone();
+    tokio::task::spawn_blocking(move || {
+        cisco::login(&c, &password, second.as_deref().unwrap_or_default(), &|level, text| engine.log_app(level, text))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn cisco_logout(st: St<'_>) -> R<()> {
+    st.engine.log_app("INFO", "Выхожу из Cisco Secure Client");
+    tokio::task::spawn_blocking(cisco::logout).await.map_err(|e| e.to_string())?
+}
+
+/// Cisco's own window: logins with a browser (SAML) or a certificate check.
+#[tauri::command]
+pub fn cisco_open() -> R<()> {
+    cisco::open_ui()
 }
 
 #[tauri::command]
@@ -1208,6 +1296,7 @@ mod tests {
             link: None,
             created_at: 0,
             wiresock: None,
+            cisco: None,
         });
         data.rules.push(Rule { id: "r1".into(), name: "x".into(), apps: vec!["a.exe".into()], ..Default::default() });
         data.presets.push(p);

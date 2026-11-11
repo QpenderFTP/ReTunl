@@ -337,6 +337,7 @@ mod tests {
             link: None,
             created_at: 0,
             wiresock: None,
+            cisco: None,
         };
         src.profiles.push(manual);
         let nl = src.profiles[0].id.clone();
@@ -405,6 +406,7 @@ mod tests {
                     link: None,
                     created_at: 0,
                     wiresock: None,
+                    cisco: None,
                 }],
             }],
             ..Default::default()

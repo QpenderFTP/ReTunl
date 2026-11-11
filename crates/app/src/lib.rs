@@ -4,6 +4,7 @@
 mod admin;
 mod api;
 mod blocks;
+mod cisco;
 mod clash;
 mod engine;
 mod fetch;
@@ -239,6 +240,11 @@ pub fn run() {
             api::set_active,
             api::rename_profile,
             api::set_wiresock,
+            api::save_cisco,
+            api::cisco_status,
+            api::cisco_login,
+            api::cisco_logout,
+            api::cisco_open,
             api::set_profile_json,
             api::delete_profiles,
             api::add_interface,

@@ -88,6 +88,12 @@ impl AppState {
                     use tauri::Emitter;
                     let _ = h.emit("need-admin", ());
                 }
+            } else if crate::engine::is_cisco_login(e) {
+                if let Some(h) = self.handle.get() {
+                    use tauri::Emitter;
+                    let id = e.split_once(':').map(|(_, id)| id).unwrap_or_default();
+                    let _ = h.emit("cisco-login", id);
+                }
             }
         }
         r
@@ -127,6 +133,7 @@ pub fn add_profiles(data: &mut AppData, items: Vec<ParsedLink>, subscription: Op
             link: links.get(i).cloned().flatten(),
             created_at: now_unix(),
             wiresock: None,
+            cisco: None,
         });
         added.push(id);
     }
@@ -174,6 +181,7 @@ pub fn merge_subscription(data: &mut AppData, sub_id: &str, items: Vec<ParsedLin
             link: None,
             created_at: created,
             wiresock,
+            cisco: None,
         });
     }
     let removed: Vec<String> = old.iter().filter(|p| !used.contains(&p.id)).map(|p| p.id.clone()).collect();
