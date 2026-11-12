@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use retunl_core::awg::CoreKind;
 use retunl_core::singbox::{self, BuildOptions};
 use retunl_core::util::now_unix;
-use retunl_core::{AppData, InboundMode, Route};
+use retunl_core::{AppData, InboundMode, Route, Settings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,6 +20,7 @@ use crate::clash::Clash;
 use crate::fetch;
 use crate::paths::Paths;
 use crate::sys;
+use crate::util::{blocking, locked};
 use crate::wiresock;
 
 /// Error text meaning "TUN needs admin rights" — the UI offers a restart.
@@ -59,6 +60,10 @@ pub struct Status {
 impl Status {
     fn new(phase: Phase) -> Status {
         Status { phase, since: None, mode: None, profile: None, error: None, warnings: Vec::new(), step: None, core: None }
+    }
+
+    fn failed(error: String) -> Status {
+        Status { error: Some(error), ..Status::new(Phase::Failed) }
     }
 }
 
@@ -121,6 +126,16 @@ struct Session {
     mixed_port: u16,
     /// (rule name, text fragments identifying it in sing-box's rule string)
     signatures: Vec<(String, Vec<String>)>,
+}
+
+/// A config that is written down and that the core accepts.
+struct Prepared {
+    /// The sing-box that runs it.
+    core: PathBuf,
+    kind: CoreKind,
+    /// The config file.
+    config: PathBuf,
+    warnings: Vec<String>,
 }
 
 struct Inner {
@@ -205,7 +220,7 @@ impl Engine {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        locked(&self.inner)
     }
 
     pub fn status(&self) -> Status {
@@ -270,7 +285,7 @@ impl Engine {
 
     /// Read whatever sing-box added to its log file.
     fn drain_tail(&self) {
-        let mut g = self.tail.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = locked(&self.tail);
         let Some(t) = g.as_mut() else { return };
         let mut buf = Vec::new();
         if t.file.read_to_end(&mut buf).is_err() || buf.is_empty() {
@@ -297,12 +312,12 @@ impl Engine {
                 Err(_) => return,
             },
         };
-        *self.tail.lock().unwrap_or_else(|e| e.into_inner()) = Some(LogTail { file, partial: Vec::new(), read: 0, writable });
+        *locked(&self.tail) = Some(LogTail { file, partial: Vec::new(), read: 0, writable });
         let me = self.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(150));
             me.drain_tail();
-            if me.lock().session.as_ref().map(|s| s.id) != Some(id) {
+            if !me.is_current(id) {
                 me.drain_tail();
                 return;
             }
@@ -310,7 +325,7 @@ impl Engine {
     }
 
     fn push_log(&self, time: String, level: String, source: &'static str, text: String) {
-        let mut g = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = locked(&self.logs);
         let seq = g.1;
         g.1 += 1;
         if g.0.len() >= LOG_CAPACITY {
@@ -320,18 +335,18 @@ impl Engine {
     }
 
     pub fn logs_after(&self, after: u64) -> (Vec<LogLine>, u64) {
-        let g = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+        let g = locked(&self.logs);
         let lines: Vec<LogLine> = g.0.iter().filter(|l| l.seq > after).cloned().collect();
         (lines, g.1 - 1)
     }
 
     pub fn clear_logs(&self) {
-        self.logs.lock().unwrap_or_else(|e| e.into_inner()).0.clear();
+        locked(&self.logs).0.clear();
     }
 
     /// The most recent sing-box error, in plain words where we know it.
     fn last_error(&self) -> Option<String> {
-        let g = self.logs.lock().unwrap_or_else(|e| e.into_inner());
+        let g = locked(&self.logs);
         g.0.iter()
             .rev()
             .take(60)
@@ -357,9 +372,7 @@ impl Engine {
                 self.set_status(Status::new(Phase::Stopped));
             } else {
                 self.log_app("ERROR", e);
-                let mut s = Status::new(Phase::Failed);
-                s.error = Some(e.clone());
-                self.set_status(s);
+                self.set_status(Status::failed(e.clone()));
             }
         }
         r
@@ -375,7 +388,7 @@ impl Engine {
             return Err("Cisco Secure Client ReTunl подключает только в Windows.".into());
         }
         self.set_step("Проверяю Cisco Secure Client…");
-        let status = tokio::task::spawn_blocking(cisco::status).await.map_err(|e| e.to_string())??;
+        let status = blocking(cisco::status).await??;
         if status.state != cisco::State::Connected {
             return Err(format!("{CISCO_LOGIN}:{first}"));
         }
@@ -405,11 +418,9 @@ impl Engine {
             Ok(a) => a,
             Err(_) => return false,
         };
-        let open = tokio::task::spawn_blocking(move || {
-            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).is_ok()
-        })
-        .await
-        .unwrap_or(false);
+        let open = blocking(move || std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).is_ok())
+            .await
+            .unwrap_or(false);
         if open {
             self.log_app("INFO", &format!("DNS для прямых соединений ({ip}) — через TLS, порт 853: строгая маршрутизация закрывает порт 53."));
         } else {
@@ -454,27 +465,55 @@ impl Engine {
             None => None,
         };
         let secret = uuid::Uuid::new_v4().simple().to_string();
-        let built = singbox::build(
-            &data,
-            &BuildOptions {
-                ruleset_dir: paths.ruleset_dir(),
-                controller_secret: secret.clone(),
-                cache_file: Some(paths.run_dir().join("cache.db")),
-                extended_available: paths.find_lx_core().is_some(),
-                direct_dns_tls,
-                wiresock: wiresock_plan.as_ref().map(|p| p.link.clone()),
-            },
-        )
-        .map_err(|e| e.0)?;
-        let core = paths.core_for(built.core).ok_or(match built.core {
+        let opts = BuildOptions {
+            ruleset_dir: paths.ruleset_dir(),
+            controller_secret: secret.clone(),
+            cache_file: Some(paths.run_dir().join("cache.db")),
+            extended_available: paths.find_lx_core().is_some(),
+            direct_dns_tls,
+            wiresock: wiresock_plan.as_ref().map(|p| p.link.clone()),
+        };
+        let Prepared { core, kind, config, mut warnings } = self.prepare_config(&data, &paths, &http, &opts).await?;
+
+        // WireSock first: it picks the network adapter before ReTunl's own is up
+        if let Some(plan) = wiresock_plan {
+            warnings.extend(self.start_wiresock(plan, &core, &paths, &data.settings).await?);
+        }
+        self.lock().cisco_logout = cisco_logout;
+
+        let (session, slow_start) = self.launch(&core, &config, &data, &paths, &secret, elevated).await?;
+        self.wait_until_up(&session, &paths, slow_start).await?;
+
+        let mut st = Status::new(Phase::Running);
+        st.since = Some(now_unix());
+        st.mode = Some(mode);
+        st.core = Some(kind);
+        st.profile = describe_route(&data);
+        st.warnings = warnings;
+        #[cfg(target_os = "android")]
+        save_session(&paths, Saved {
+            port: data.settings.controller_port,
+            secret: secret.clone(),
+            signatures: session.signatures.clone(),
+            status: st.clone(),
+        });
+        self.set_status(st);
+        self.log_app("INFO", "Подключено");
+        Ok(())
+    }
+
+    /// Build the sing-box config, download the lists it names, write it down
+    /// and let the core check it.
+    async fn prepare_config(&self, data: &AppData, paths: &Paths, http: &reqwest::Client, opts: &BuildOptions) -> Result<Prepared, String> {
+        let mut built = singbox::build(data, opts).map_err(|e| e.0)?;
+        let kind = built.core;
+        let core = paths.core_for(kind).ok_or(match kind {
             CoreKind::Official => "Не найдено официальное ядро sing-box. Скачайте его: «Настройки» → «Ядро и списки».",
             CoreKind::Extended => "Не найдено ядро sing-box-lx. Скачайте его: «Настройки» → «Ядро и списки».",
         })?;
-        let core_kind = built.core;
-        if core_kind == CoreKind::Extended {
+        if kind == CoreKind::Extended {
             self.log_app("INFO", &format!("Ядро: sing-box-lx {}", retunl_core::SING_BOX_LX_VERSION));
         }
-        let mut built = built;
         // Blocks are only reported at debug level: run sing-box that way and
         // keep showing the lines of the level the user chose.
         let counting = has_reject(&built.config);
@@ -494,45 +533,64 @@ impl Engine {
                 }
             }
         }
-        let mut warnings = built.warnings.clone();
+        let mut warnings = built.warnings;
         for w in &warnings {
             self.log_app("WARN", w);
         }
         if !built.rule_sets.is_empty() {
             self.set_step(&format!("Проверяю списки сайтов ({})…", built.rule_sets.len()));
-            let w = fetch::ensure_rule_sets(&http, &built.rule_sets, &paths.ruleset_dir(), false).await?;
+            let w = fetch::ensure_rule_sets(http, &built.rule_sets, &paths.ruleset_dir(), false).await?;
             for x in &w {
                 self.log_app("WARN", x);
             }
             warnings.extend(w);
         }
 
-        let cfg_path = paths.run_dir().join("config.json");
+        let config = paths.run_dir().join("config.json");
         let json = serde_json::to_vec_pretty(&built.config).map_err(|e| e.to_string())?;
-        std::fs::write(&cfg_path, json).map_err(|e| format!("Не удалось записать конфигурацию: {e}"))?;
+        std::fs::write(&config, json).map_err(|e| format!("Не удалось записать конфигурацию: {e}"))?;
 
         self.set_step("Проверяю конфигурацию…");
-        {
-            let (core, cfg, dir) = (core.clone(), cfg_path.clone(), paths.run_dir());
-            tokio::task::spawn_blocking(move || check_config(&core, &cfg, &dir))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|line| format!("sing-box не принял конфигурацию: {}", humanize(&line)))?;
-        }
+        let (exe, file, dir) = (core.clone(), config.clone(), paths.run_dir());
+        blocking(move || check_config(&exe, &file, &dir))
+            .await?
+            .map_err(|line| format!("sing-box не принял конфигурацию: {}", humanize(&line)))?;
+        Ok(Prepared { core, kind, config, warnings })
+    }
 
-        // WireSock first: it picks the network adapter before ReTunl's own is up
-        if let Some(plan) = wiresock_plan {
-            self.set_step("Запускаю WireSock…");
-            let me = self.clone();
-            let log: wiresock::Log = Arc::new(move |level: &str, text: &str| me.log_app(level, text));
-            let mut tunnel = wiresock::start(plan, &core, &paths.run_dir(), &data.settings, self.job.as_ref(), log).await?;
-            warnings.extend(tunnel.warning.take());
-            let mut g = self.lock();
-            g.wiresock = Some(tunnel);
-            g.wiresock_error = None;
-        }
+    /// WireSock and its helper, for the server that goes through them. Gives
+    /// WireSock's warning, if it has one.
+    async fn start_wiresock(
+        self: &Arc<Self>,
+        plan: wiresock::Plan,
+        core: &Path,
+        paths: &Paths,
+        settings: &Settings,
+    ) -> Result<Option<String>, String> {
+        self.set_step("Запускаю WireSock…");
+        let me = self.clone();
+        let log: wiresock::Log = Arc::new(move |level: &str, text: &str| me.log_app(level, text));
+        let mut tunnel = wiresock::start(plan, core, &paths.run_dir(), settings, self.job.as_ref(), log).await?;
+        let warning = tunnel.warning.take();
+        let mut g = self.lock();
+        g.wiresock = Some(tunnel);
+        g.wiresock_error = None;
+        Ok(warning)
+    }
 
-        self.lock().cisco_logout = cisco_logout;
+    /// Start the core and what goes with it: its log lines, the session, the
+    /// watcher. Gives the session and whether the start may wait for the user
+    /// (a password prompt).
+    async fn launch(
+        self: &Arc<Self>,
+        core: &Path,
+        config: &Path,
+        data: &AppData,
+        paths: &Paths,
+        secret: &str,
+        elevated: bool,
+    ) -> Result<(Arc<Session>, bool), String> {
+        let mode = data.settings.mode;
         let tun = mode == InboundMode::Tun;
         self.set_step(match mode {
             InboundMode::Tun if cfg!(target_os = "android") => "Включаю VPN…",
@@ -542,10 +600,8 @@ impl Engine {
         });
         // Android may first ask the user to allow the VPN: off the async threads
         let sys::Launch { mut child, log, slow_start, stop } = {
-            let (core, cfg, dir) = (core.clone(), cfg_path.clone(), paths.run_dir());
-            tokio::task::spawn_blocking(move || sys::launch_core(&core, &cfg, &dir, tun && !elevated))
-                .await
-                .map_err(|e| e.to_string())??
+            let (core, cfg, dir) = (core.to_path_buf(), config.to_path_buf(), paths.run_dir());
+            blocking(move || sys::launch_core(&core, &cfg, &dir, tun && !elevated)).await??
         };
         if let Some(job) = &self.job {
             job.assign(&child);
@@ -565,7 +621,6 @@ impl Engine {
             });
         }
 
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let signatures = data
             .rules
             .iter()
@@ -573,17 +628,25 @@ impl Engine {
             .map(|r| (r.name.clone(), singbox::rule_signatures(r)))
             .collect();
         let session = Arc::new(Session {
-            id,
-            clash: Clash::new(data.settings.controller_port, &secret),
+            id: self.next_id.fetch_add(1, Ordering::SeqCst),
+            clash: Clash::new(data.settings.controller_port, secret),
             mode,
             mixed_port: data.settings.mixed_port,
             signatures,
         });
+        self.attach(child, stop, session.clone(), log);
+        Ok((session, slow_start))
+    }
+
+    /// Take a running core as the current connection and watch it. `log`:
+    /// the file it writes its log to instead of the pipes.
+    fn attach(self: &Arc<Self>, child: sys::Proc, stop: sys::Stop, session: Arc<Session>, log: Option<PathBuf>) {
+        let id = session.id;
         {
             let mut g = self.lock();
             g.child = Some(child);
             g.stop = Some(stop);
-            g.session = Some(session.clone());
+            g.session = Some(session);
             g.stopping = false;
             g.last_sample = None;
             g.end_error = None;
@@ -593,13 +656,16 @@ impl Engine {
         }
         let me = self.clone();
         std::thread::spawn(move || me.watch(id));
+    }
 
-        // a password prompt can take a while
+    /// Wait for the core's control API to answer. `slow_start`: a password
+    /// prompt stands before the start, so the wait is long.
+    async fn wait_until_up(&self, session: &Session, paths: &Paths, slow_start: bool) -> Result<(), String> {
         let wait_secs = if slow_start { 180 } else { 20 };
         let deadline = Instant::now() + Duration::from_secs(wait_secs);
         let mut asked = slow_start;
         loop {
-            if self.lock().session.as_ref().map(|s| s.id) != Some(id) {
+            if !self.is_current(session.id) {
                 return Err(self.start_failure());
             }
             if session.clash.alive().await {
@@ -617,26 +683,15 @@ impl Engine {
         }
         // late start errors (e.g. TUN creation) end the process right away
         tokio::time::sleep(Duration::from_millis(400)).await;
-        if self.lock().session.as_ref().map(|s| s.id) != Some(id) {
+        if !self.is_current(session.id) {
             return Err(self.start_failure());
         }
-
-        let mut st = Status::new(Phase::Running);
-        st.since = Some(now_unix());
-        st.mode = Some(mode);
-        st.core = Some(core_kind);
-        st.profile = describe_route(&data);
-        st.warnings = warnings;
-        #[cfg(target_os = "android")]
-        save_session(&paths, Saved {
-            port: data.settings.controller_port,
-            secret: secret.clone(),
-            signatures: session.signatures.clone(),
-            status: st.clone(),
-        });
-        self.set_status(st);
-        self.log_app("INFO", "Подключено");
         Ok(())
+    }
+
+    /// The connection `id` is still the current one.
+    fn is_current(&self, id: u64) -> bool {
+        self.lock().session.as_ref().map(|s| s.id) == Some(id)
     }
 
     fn start_failure(&self) -> String {
@@ -658,26 +713,14 @@ impl Engine {
             let _ = sys::Proc::new(sys::MAIN).kill();
             return;
         };
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let session = Arc::new(Session {
-            id,
+            id: self.next_id.fetch_add(1, Ordering::SeqCst),
             clash: Clash::new(saved.port, &saved.secret),
             mode: InboundMode::Tun,
             mixed_port: 0,
             signatures: saved.signatures,
         });
-        {
-            let mut g = self.lock();
-            g.child = Some(sys::Proc::new(sys::MAIN));
-            g.stop = Some(sys::Stop);
-            g.session = Some(session);
-            g.stopping = false;
-            g.last_sample = None;
-            g.end_error = None;
-        }
-        self.start_tail(paths.run_dir().join("core.log"), id);
-        let me = self.clone();
-        std::thread::spawn(move || me.watch(id));
+        self.attach(sys::Proc::new(sys::MAIN), sys::Stop, session, Some(paths.run_dir().join("core.log")));
         self.set_status(saved.status);
         self.log_app("INFO", "VPN уже был включён — продолжаю это подключение");
     }
@@ -733,9 +776,7 @@ impl Engine {
                     .unwrap_or_else(|| format!("sing-box неожиданно завершился ({code})."));
                 self.log_app("ERROR", &format!("Соединение прервано: {msg}"));
                 self.lock().end_error = Some(msg.clone());
-                let mut s = Status::new(Phase::Failed);
-                s.error = Some(msg);
-                self.set_status(s);
+                self.set_status(Status::failed(msg));
             }
             return;
         }
@@ -780,7 +821,7 @@ impl Engine {
         s.step = Some("Отключаюсь…".into());
         self.set_status(s);
         let me = self.clone();
-        let _ = tokio::task::spawn_blocking(move || me.terminate(pid)).await;
+        let _ = blocking(move || me.terminate(pid)).await;
         self.cisco_logout().await;
     }
 
@@ -790,7 +831,7 @@ impl Engine {
             return;
         }
         self.log_app("INFO", "Выхожу из Cisco Secure Client");
-        match tokio::task::spawn_blocking(cisco::logout).await.map_err(|e| e.to_string()) {
+        match blocking(cisco::logout).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) | Err(e) => self.log_app("WARN", &format!("Не удалось выйти из Cisco Secure Client: {e}")),
         }
@@ -818,6 +859,7 @@ impl Engine {
     }
 
     /// For app exit: stop synchronously and leave the system clean.
+    #[cfg_attr(mobile, allow(dead_code))]
     pub fn shutdown_blocking(&self) {
         let info = {
             let g = self.lock();
@@ -990,7 +1032,7 @@ fn mode_label(m: InboundMode) -> &'static str {
     }
 }
 
-/// Plain-language versions of common sing-box errors.
+/// What a new window needs to take over a connection that is still up.
 #[cfg(target_os = "android")]
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -1041,6 +1083,7 @@ fn exit_error(_: &std::process::ExitStatus) -> Option<String> {
 #[cfg(target_os = "android")]
 use sys::{clean_exit as exit_clean, exit_error};
 
+/// Plain-language versions of common sing-box errors.
 pub fn humanize(err: &str) -> String {
     let e = err.trim();
     let lower = e.to_lowercase();
@@ -1106,281 +1149,4 @@ fn local_offset_secs() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use retunl_core::{AppData, InboundMode, Route};
-
-    use super::*;
-
-    fn test_core() -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("SING_BOX") {
-            return Some(PathBuf::from(p)).filter(|p| p.exists());
-        }
-        let rel = if cfg!(windows) {
-            "../../.tools/sing-box/sing-box-1.14.4-windows-amd64/sing-box.exe"
-        } else {
-            "../../.tools/sing-box/sing-box-1.14.4-darwin-arm64/sing-box"
-        };
-        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
-        p.exists().then_some(p)
-    }
-
-    /// A real connection in proxy mode, without touching the system proxy.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn connect_and_disconnect() {
-        let Some(core) = test_core() else {
-            eprintln!("sing-box not found, skipping");
-            return;
-        };
-        std::env::set_var("RETUNL_NO_SYSTEM_PROXY", "1");
-        let dir = std::env::temp_dir().join(format!("retunl-engine-{}", uuid::Uuid::new_v4().simple()));
-        let paths = Paths { exe_dir: dir.clone(), data_dir: dir.join("data"), local_dir: dir.join("local"), portable: false };
-        for d in [paths.data_dir.clone(), paths.core_dir(), paths.ruleset_dir(), paths.run_dir()] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::fs::copy(&core, paths.core_dir().join(crate::paths::CORE_EXE)).unwrap();
-
-        let mut data = AppData::default();
-        data.settings.mode = InboundMode::SystemProxy;
-        data.settings.final_route = Route::Direct;
-        data.settings.mixed_port = pick_port(0);
-        let port = data.settings.mixed_port;
-
-        let engine = Arc::new(Engine::new(None));
-        let req = StartRequest { data, paths: paths.clone(), http: crate::fetch::http_client(), elevated: false };
-        engine.start(req).await.expect("connect");
-        assert_eq!(engine.status().phase, Phase::Running);
-        assert!(!port_free(port), "proxy port is not listening");
-        assert!(engine.poll(true).await.traffic.is_some());
-
-        engine.stop().await;
-        let until = Instant::now() + Duration::from_secs(10);
-        while engine.status().phase != Phase::Stopped && Instant::now() < until {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(engine.status().phase, Phase::Stopped);
-        assert!(port_free(port), "sing-box still holds the port");
-        let (lines, _) = engine.logs_after(0);
-        assert!(lines.iter().any(|l| l.source == "core"), "no sing-box output in the log");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A block rule: the request is counted, and the debug lines sing-box
-    /// prints for it stay out of a log set to the normal level.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn counts_blocked_requests() {
-        let Some(core) = test_core() else {
-            eprintln!("sing-box not found, skipping");
-            return;
-        };
-        std::env::set_var("RETUNL_NO_SYSTEM_PROXY", "1");
-        let dir = std::env::temp_dir().join(format!("retunl-blocks-{}", uuid::Uuid::new_v4().simple()));
-        let paths = Paths { exe_dir: dir.clone(), data_dir: dir.join("data"), local_dir: dir.join("local"), portable: false };
-        for d in [paths.data_dir.clone(), paths.core_dir(), paths.ruleset_dir(), paths.run_dir()] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::fs::copy(&core, paths.core_dir().join(crate::paths::CORE_EXE)).unwrap();
-
-        let mut data = AppData::default();
-        data.settings.mode = InboundMode::SystemProxy;
-        data.settings.final_route = Route::Direct;
-        data.settings.mixed_port = pick_port(0);
-        data.settings.log_level = "info".into();
-        // the other test runs at the same time: its own control port
-        data.settings.controller_port = pick_port(0);
-        data.rules.push(retunl_core::Rule {
-            id: "ads".into(),
-            name: "Реклама".into(),
-            enabled: true,
-            domains: vec!["blocked.example".into()],
-            route: Route::Block,
-            ..Default::default()
-        });
-        let port = data.settings.mixed_port;
-
-        let stats = paths.data_dir.join("stats.json");
-        let engine = Arc::new(Engine::new(Some(stats.clone())));
-        let req = StartRequest { data, paths: paths.clone(), http: crate::fetch::http_client(), elevated: false };
-        engine.start(req).await.expect("connect");
-        let http = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).unwrap())
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-        let r = http.get("http://ads.blocked.example/pixel").send().await;
-        assert!(r.as_ref().map_or(true, |r| !r.status().is_success()), "the blocked request went through: {r:?}");
-        let until = Instant::now() + Duration::from_secs(5);
-        while engine.blocks.stats().session == 0 && Instant::now() < until {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let s = engine.poll(false).await.blocks;
-        assert_eq!(s.session, 1);
-        assert!(s.counting);
-        assert_eq!(s.top, vec![("ads.blocked.example".to_string(), 1)]);
-
-        engine.stop().await;
-        let until = Instant::now() + Duration::from_secs(10);
-        while engine.status().phase != Phase::Stopped && Instant::now() < until {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let (lines, _) = engine.logs_after(0);
-        assert!(lines.iter().any(|l| l.source == "core"), "no sing-box output in the log");
-        assert!(!lines.iter().any(|l| l.level == "DEBUG"), "debug lines leaked into the log");
-        // the total is saved when the connection ends
-        assert_eq!(Engine::new(Some(stats)).blocks.stats().total, 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    /// WireSock for real, in proxy mode. `RETUNL_WS_CONF`: a WireGuard `.conf`
-    /// (masking in `#@ws:` lines), `RETUNL_WS_IP`: the address its server goes
-    /// out from, `RETUNL_WS_LOG`: where the report goes (the Ctrl+Break sent
-    /// to WireSock takes this process's console, and its output with it).
-    /// Needs WireSock VPN Client and a prompt run as administrator:
-    ///
-    /// ```text
-    /// cargo test -p retunl wiresock_live -- --ignored --nocapture
-    /// ```
-    #[cfg(windows)]
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
-    async fn wiresock_live() {
-        wiresock_live_in(false).await;
-    }
-
-    /// The same with the virtual adapter: curl.exe goes to the server by a
-    /// rule, the rest of the computer straight out.
-    #[cfg(windows)]
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
-    async fn wiresock_live_tun() {
-        wiresock_live_in(true).await;
-    }
-
-    #[cfg(windows)]
-    async fn wiresock_live_in(tun: bool) {
-        let report = std::env::var("RETUNL_WS_LOG").expect("RETUNL_WS_LOG");
-        let say = {
-            let report = report.clone();
-            move |text: &str| {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&report) {
-                    let _ = writeln!(f, "{text}");
-                }
-            }
-        };
-        let said = say.clone();
-        std::panic::set_hook(Box::new(move |info| said(&format!("FAILED: {info}"))));
-        let conf = std::fs::read_to_string(std::env::var("RETUNL_WS_CONF").expect("RETUNL_WS_CONF")).unwrap();
-        let want_ip = std::env::var("RETUNL_WS_IP").expect("RETUNL_WS_IP");
-        let core = test_core().expect("sing-box");
-        assert!(sys::is_elevated(), "run it as administrator");
-        std::env::set_var("RETUNL_NO_SYSTEM_PROXY", "1");
-        let dir = std::env::temp_dir().join(format!("retunl-wiresock-{}", uuid::Uuid::new_v4().simple()));
-        let paths = Paths { exe_dir: dir.clone(), data_dir: dir.join("data"), local_dir: dir.join("local"), portable: false };
-        for d in [paths.data_dir.clone(), paths.core_dir(), paths.ruleset_dir(), paths.run_dir()] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::fs::copy(&core, paths.core_dir().join(crate::paths::CORE_EXE)).unwrap();
-
-        let wg = retunl_core::wgconf::parse(&conf, "WireSock").unwrap();
-        let ws = retunl_core::WireSock { enabled: true, ..wg.wiresock.unwrap_or_default() };
-        say(&format!("masking: {ws:?}"));
-        let mut data = AppData::default();
-        data.profiles.push(retunl_core::Profile {
-            id: "ws".into(),
-            name: wg.profile.name,
-            outbound: wg.profile.outbound,
-            subscription: None,
-            link: None,
-            created_at: 0,
-            wiresock: Some(ws),
-            cisco: None,
-        });
-        data.settings.active_profile = Some("ws".into());
-        if tun {
-            data.settings.mode = InboundMode::Tun;
-            data.settings.final_route = Route::Direct;
-            data.rules.push(retunl_core::Rule {
-                id: "curl".into(),
-                name: "curl".into(),
-                enabled: true,
-                apps: vec!["curl.exe".into()],
-                route: Route::Profile { id: "ws".into() },
-                ..Default::default()
-            });
-        } else {
-            data.settings.mode = InboundMode::SystemProxy;
-            data.settings.final_route = Route::Proxy;
-        }
-        data.settings.mixed_port = pick_port(0);
-        data.settings.controller_port = pick_port(0);
-        let port = data.settings.mixed_port;
-
-        let engine = Arc::new(Engine::new(None));
-        let req = StartRequest { data: data.clone(), paths: paths.clone(), http: crate::fetch::http_client(), elevated: true };
-        let started = engine.start(req).await;
-        let print_log = |from: u64| {
-            let (lines, _) = engine.logs_after(from);
-            for l in &lines {
-                say(&format!("  [{} {}] {}", l.source, l.level, l.text));
-            }
-            lines.last().map_or(from, |l| l.seq)
-        };
-        let seen = print_log(0);
-        started.expect("connect");
-        let warnings = engine.status().warnings;
-        say(&format!("warnings: {warnings:?}"));
-        assert!(warnings.is_empty());
-        let link = engine.wiresock_link().expect("WireSock is up");
-        let running = |name: &str| sys::processes().iter().any(|p| p.name.eq_ignore_ascii_case(name));
-        assert!(running("wiresock-client.exe") && running("retunl-wiresock-out.exe"));
-
-        if tun {
-            // curl.exe goes to the server by its rule, this test straight out
-            let out = std::process::Command::new("curl.exe").args(["-s", "--max-time", "15", "https://api.ipify.org"]).output().unwrap();
-            let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            say(&format!("curl.exe goes out from {ip}"));
-            assert_eq!(ip, want_ip);
-            let direct = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(15)).build().unwrap();
-            let ip = direct.get("https://api.ipify.org").send().await.unwrap().text().await.unwrap();
-            say(&format!("the rest goes out from {ip}"));
-            assert_ne!(ip.trim(), want_ip);
-        } else {
-            // the proxy goes out from the server
-            let http = reqwest::Client::builder()
-                .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).unwrap())
-                .timeout(Duration::from_secs(15))
-                .build()
-                .unwrap();
-            let ip = http.get("https://api.ipify.org").send().await.unwrap().text().await.unwrap();
-            say(&format!("goes out from {ip}"));
-            assert_eq!(ip.trim(), want_ip);
-        }
-
-        // latency and speed of the server go through WireSock too
-        let through = crate::wiresock::through_tunnel(data.profiles[0].clone(), Some(&link));
-        let lat = crate::probe::measure(&paths, &data.settings, vec![through.clone()], engine.job()).await.unwrap();
-        say(&format!("latency: {:?}", lat["ws"]));
-        assert!(lat["ws"].ms.is_some(), "{:?}", lat["ws"]);
-        let speed = crate::speed::run(&paths, &data.settings, Some(through), engine.job(), |_| {}).await.unwrap();
-        say(&format!("speed: direct {:?}; vpn {:?}", speed.direct, speed.vpn));
-        assert!(speed.vpn.as_ref().is_some_and(|v| v.mbps.is_some()), "{:?}", speed.vpn);
-
-        engine.stop().await;
-        let until = Instant::now() + Duration::from_secs(10);
-        while engine.status().phase != Phase::Stopped && Instant::now() < until {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        print_log(seen);
-        assert_eq!(engine.status().phase, Phase::Stopped);
-        // WireSock and the helper end with the connection
-        let until = Instant::now() + Duration::from_secs(5);
-        while (running("wiresock-client.exe") || running("retunl-wiresock-out.exe")) && Instant::now() < until {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        assert!(!running("wiresock-client.exe"), "WireSock is still running");
-        assert!(!running("retunl-wiresock-out.exe"), "the helper is still running");
-        say("PASSED");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+mod tests;

@@ -8,7 +8,8 @@ import {
   isScanning, cancelScan, profile, connect,
 } from './store.js';
 import { overview, speedProgress } from './overview.js';
-import { servers, ciscoLogin } from './servers.js';
+import { servers } from './servers.js';
+import { ciscoLogin } from './cisco.js';
 import { myServers, loadHosts } from './hosts.js';
 import { rules } from './rules.js';
 import { activity } from './activity.js';

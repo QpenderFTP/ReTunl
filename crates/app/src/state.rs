@@ -14,6 +14,7 @@ use crate::probe::Latency;
 use crate::speed::SpeedResult;
 #[cfg(desktop)]
 use crate::tray::Tray;
+use crate::util::locked;
 use crate::{fetch, store};
 
 pub struct AppState {
@@ -63,12 +64,12 @@ impl AppState {
     }
 
     pub fn snapshot(&self) -> AppData {
-        self.data.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        locked(&self.data).clone()
     }
 
     /// Change data and save it; nothing changes if `f` fails or saving fails.
     pub fn mutate<R>(&self, f: impl FnOnce(&mut AppData) -> Result<R, String>) -> Result<R, String> {
-        let mut guard = self.data.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = locked(&self.data);
         let mut copy = guard.clone();
         let r = f(&mut copy)?;
         store::save(&self.paths.data_file(), &copy).map_err(|e| format!("Не удалось сохранить данные: {e}"))?;
@@ -126,14 +127,10 @@ pub fn add_profiles(data: &mut AppData, items: Vec<ParsedLink>, subscription: Op
         }
         let id = new_id();
         data.profiles.push(Profile {
-            id: id.clone(),
-            name: item.name,
-            outbound: item.outbound,
             subscription: subscription.map(str::to_string),
             link: links.get(i).cloned().flatten(),
             created_at: now_unix(),
-            wiresock: None,
-            cisco: None,
+            ..Profile::new(id.clone(), item.name, item.outbound)
         });
         added.push(id);
     }
@@ -174,14 +171,10 @@ pub fn merge_subscription(data: &mut AppData, sub_id: &str, items: Vec<ParsedLin
             }
         };
         fresh.push(Profile {
-            id,
-            name: item.name,
-            outbound: item.outbound,
             subscription: Some(sub_id.to_string()),
-            link: None,
             created_at: created,
             wiresock,
-            cisco: None,
+            ..Profile::new(id, item.name, item.outbound)
         });
     }
     let removed: Vec<String> = old.iter().filter(|p| !used.contains(&p.id)).map(|p| p.id.clone()).collect();

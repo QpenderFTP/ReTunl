@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::util::locked;
+
 /// Lookups of one domain within this time (A, AAAA, HTTPS, retries) count once.
 const SAME_VISIT: Duration = Duration::from_secs(2);
 const SAVE_EVERY: Duration = Duration::from_secs(20);
@@ -64,7 +66,7 @@ impl Blocks {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        locked(&self.state)
     }
 
     /// A new connection: the session count starts from zero.

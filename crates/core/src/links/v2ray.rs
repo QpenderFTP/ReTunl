@@ -57,7 +57,7 @@ pub fn trojan(link: &str) -> LinkResult {
 
 /// `vmess://base64(json)` in the v2rayN format; falls back to the URL form.
 pub fn vmess(link: &str) -> LinkResult {
-    let body = link.trim().splitn(2, "://").nth(1).unwrap_or("");
+    let body = link.trim().split_once("://").map_or("", |(_, rest)| rest);
     let (body, fragment) = match body.split_once('#') {
         Some((b, f)) => (b, Some(crate::util::pct_decode(f))),
         None => (body, None),

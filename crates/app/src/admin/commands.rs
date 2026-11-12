@@ -10,6 +10,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use super::{install, AddForm, ClientKey, Kind, Plan, ServerView};
 use crate::state::{add_profiles, AppState};
+use crate::util::blocking;
 
 type St<'a> = State<'a, Arc<AppState>>;
 type R<T> = Result<T, String>;
@@ -113,15 +114,14 @@ pub fn admin_trust_key(st: St<'_>, id: String) -> R<()> {
 #[tauri::command]
 pub async fn admin_pick_key(app: AppHandle, st: St<'_>) -> R<Option<String>> {
     let a = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
+    let picked = blocking(move || {
         let mut d = a.dialog().file().set_title("SSH-ключ");
         if let Some(home) = dirs::home_dir() {
             d = d.set_directory(home.join(".ssh"));
         }
         d.blocking_pick_file()
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await?;
     let Some(picked) = picked else { return Ok(None) };
     if let Ok(p) = picked.clone().into_path() {
         return Ok(Some(p.to_string_lossy().into_owned()));
@@ -157,11 +157,10 @@ pub fn admin_use_client(st: St<'_>, text: String, name: String) -> R<String> {
 #[tauri::command]
 pub async fn admin_save_conf(app: AppHandle, name: String, text: String) -> R<Option<String>> {
     let a = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
+    let picked = blocking(move || {
         a.dialog().file().set_title("Сохранить настройки клиента").set_file_name(&name).add_filter("WireGuard", &["conf"]).blocking_save_file()
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await?;
     let Some(picked) = picked else { return Ok(None) };
     crate::files::write(&app, &picked, text.as_bytes())?;
     Ok(Some(crate::files::shown(&picked)))

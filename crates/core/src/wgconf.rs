@@ -620,7 +620,7 @@ PersistentKeepalive = 25
 
     fn profile(conf: &str, ws: Option<WireSock>) -> Profile {
         let p = parse(conf, "x").unwrap().profile;
-        Profile { id: "p".into(), name: p.name, outbound: p.outbound, subscription: None, link: None, created_at: 0, wiresock: ws, cisco: None }
+        Profile { wiresock: ws, ..Profile::new("p", p.name, p.outbound) }
     }
 
     #[test]

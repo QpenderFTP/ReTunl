@@ -174,6 +174,19 @@ export function errText(e) {
   return e.message || String(e);
 }
 
+/** The line where a form says what went wrong: hidden until `showError`. */
+export const formError = () => h('p.form-error', { hidden: true });
+
+export function showError(el, e) {
+  el.hidden = false;
+  el.textContent = errText(e);
+}
+
+/** A form field: the label belongs to the control with this `id`. */
+export function field(id, label, control, note) {
+  return h('div.field', h('label.field-label', { htmlFor: id }, label), control, note && h('p.field-note', note));
+}
+
 // ---------- toasts ----------
 
 export function toast(text, opts = {}) {

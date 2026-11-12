@@ -485,16 +485,7 @@ mod tests {
         std::fs::write(&server_cfg, serde_json::to_vec(&ss).unwrap()).unwrap();
         let mut server = std::process::Command::new(&core).args(["run", "-c"]).arg(&server_cfg).spawn().unwrap();
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let profile = Profile {
-            id: "p1".into(),
-            name: "Local SS".into(),
-            outbound: json!({"type": "shadowsocks", "server": "127.0.0.1", "server_port": port, "method": "aes-128-gcm", "password": "test-password"}),
-            subscription: None,
-            link: None,
-            created_at: 0,
-            wiresock: None,
-            cisco: None,
-        };
+        let profile = Profile::new("p1", "Local SS", json!({"type": "shadowsocks", "server": "127.0.0.1", "server_port": port, "method": "aes-128-gcm", "password": "test-password"}));
         let r = run(&paths, &Settings::default(), Some(profile), None, |_| {}).await.unwrap();
         let _ = server.kill();
         let _ = server.wait();

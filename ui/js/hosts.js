@@ -3,7 +3,7 @@
 // installs new protocols on a clean server.
 
 import {
-  h, s, icon, invoke, listen, busy, toast, errorToast, errText, dialog, confirmDialog, promptDialog, popMenu,
+  h, s, icon, invoke, listen, busy, toast, errorToast, errText, formError, showError, dialog, confirmDialog, promptDialog, popMenu,
   pageHead, fmtAgo, fmtBytes, plural, banner, seg, now,
 } from './lib.js';
 import { store, refresh, copyText, reportImport, here } from './store.js';
@@ -599,7 +599,7 @@ export function addDialog(mode = 'password') {
     field('Название', f.name));
   const amBox = h('div.form-stack',
     field('Ключ AmneziaVPN с полным доступом', f.link, 'В AmneziaVPN откройте сервер, «Поделиться» → «Полный доступ». В таком ключе есть логин и пароль от сервера; обычный ключ для подключения не подойдёт.'));
-  const err = h('p.form-error', { hidden: true });
+  const err = formError();
   const paint = () => {
     sshBox.hidden = m === 'amnezia';
     pwBox.hidden = m !== 'password';
@@ -608,7 +608,7 @@ export function addDialog(mode = 'password') {
     err.hidden = true;
   };
   const submit = h('button.btn.primary', { onclick: () => go() }, 'Подключиться');
-  const fail = (e) => { err.hidden = false; err.textContent = errText(e); };
+  const fail = (e) => showError(err, e);
   function go() {
     if (m === 'amnezia') {
       const text = f.link.value.trim();
@@ -700,7 +700,7 @@ function installDialog(sv, prev) {
     h('label.field-label', { htmlFor: 'inst-site' }, 'Сайт для маскировки'),
     site,
     h('p.field-note', 'Чужой сайт с HTTPS и TLS 1.3. Для постороннего глаза соединение будет выглядеть как заход на него.'));
-  const err = h('p.form-error', { hidden: true });
+  const err = formError();
   const setPick = (o, keepPort) => {
     pick = o;
     if (!keepPort) port.value = String(o.port());
@@ -722,8 +722,7 @@ function installDialog(sv, prev) {
       const p = Number(port.value);
       if (!Number.isInteger(p) || p < 1 || p > 65535) { port.focus(); return; }
       if (pick.kind === 'xray' && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(site.value.trim())) {
-        err.hidden = false;
-        err.textContent = 'Укажите адрес сайта без https:// и пути, например www.googletagmanager.com';
+        showError(err, 'Укажите адрес сайта без https:// и пути, например www.googletagmanager.com');
         site.focus();
         return;
       }

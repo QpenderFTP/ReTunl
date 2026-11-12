@@ -69,6 +69,11 @@ pub const PROXY_TYPES: &[&str] = &[
 ];
 
 impl Profile {
+    /// A server with only its connection: no subscription, link or extras.
+    pub fn new(id: impl Into<String>, name: impl Into<String>, outbound: Value) -> Profile {
+        Profile { id: id.into(), name: name.into(), outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None }
+    }
+
     pub fn protocol(&self) -> &str {
         self.outbound.get("type").and_then(Value::as_str).unwrap_or("?")
     }
@@ -162,10 +167,11 @@ impl Profile {
 }
 
 /// Where a rule (or all unmatched traffic) goes.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Route {
     /// The currently selected server.
+    #[default]
     Proxy,
     /// A specific server, regardless of the selected one.
     Profile { id: String },
@@ -173,12 +179,6 @@ pub enum Route {
     Direct,
     /// Drop the connection.
     Block,
-}
-
-impl Default for Route {
-    fn default() -> Self {
-        Route::Proxy
-    }
 }
 
 /// A split-tunnel rule.
@@ -493,6 +493,10 @@ impl Default for AppData {
 impl AppData {
     pub fn profile(&self, id: &str) -> Option<&Profile> {
         self.profiles.iter().find(|p| p.id == id)
+    }
+
+    pub fn profile_mut(&mut self, id: &str) -> Option<&mut Profile> {
+        self.profiles.iter_mut().find(|p| p.id == id)
     }
 
     pub fn active_profile(&self) -> Option<&Profile> {

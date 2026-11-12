@@ -6,7 +6,7 @@ use crate::awg::CoreKind;
 
 fn profile(id: &str, link: &str) -> Profile {
     let p = parse_link(link).unwrap();
-    Profile { id: id.into(), name: p.name, outbound: p.outbound, subscription: None, link: Some(link.into()), created_at: 0, wiresock: None, cisco: None }
+    Profile { link: Some(link.into()), ..Profile::new(id, p.name, p.outbound) }
 }
 
 fn opts() -> BuildOptions {
@@ -197,7 +197,7 @@ fn wireguard_own_networks_go_to_it() {
     let mut d = base();
     let conf = "[Interface]\nAddress = 172.16.6.8/32\nPrivateKey = cHJpdg==\n\n[Peer]\nPublicKey = cHVi\nEndpoint = router.example.net:41495\nAllowedIPs = 172.16.6.0/24\n";
     let wg = crate::wgconf::parse(conf, "WorkTest").unwrap().profile;
-    d.profiles.push(Profile { id: "wg".into(), name: wg.name, outbound: wg.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None });
+    d.profiles.push(Profile::new("wg", wg.name, wg.outbound));
     d.settings.final_route = Route::Direct;
     let mut yt = rule("YouTube", Route::Profile { id: "wg".into() });
     yt.domains = vec!["youtube.com".into()];

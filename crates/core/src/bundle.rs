@@ -329,16 +329,7 @@ mod tests {
         let mut src = AppData::default();
         let b = sample();
         merge(&mut src, b.clone());
-        let manual = Profile {
-            id: "m1".into(),
-            name: "Дом".into(),
-            outbound: json!({"type": "socks", "server": "10.0.0.1", "server_port": 1080}),
-            subscription: None,
-            link: None,
-            created_at: 0,
-            wiresock: None,
-            cisco: None,
-        };
+        let manual = Profile::new("m1", "Дом", json!({"type": "socks", "server": "10.0.0.1", "server_port": 1080}));
         src.profiles.push(manual);
         let nl = src.profiles[0].id.clone();
         src.rules.push(Rule { id: "r1".into(), name: "Telegram".into(), apps: vec!["Telegram.exe".into()], route: Route::Profile { id: nl.clone() }, ..Default::default() });
@@ -398,16 +389,7 @@ mod tests {
                     info: None,
                     last_error: None,
                 },
-                profiles: vec![Profile {
-                    id: "p1".into(),
-                    name: "NL".into(),
-                    outbound: json!({"type": "vless", "server": "nl.example.com", "server_port": 443}),
-                    subscription: Some("s1".into()),
-                    link: None,
-                    created_at: 0,
-                    wiresock: None,
-                    cisco: None,
-                }],
+                profiles: vec![Profile { subscription: Some("s1".into()), ..Profile::new("p1", "NL", json!({"type": "vless", "server": "nl.example.com", "server_port": 443})) }],
             }],
             ..Default::default()
         }

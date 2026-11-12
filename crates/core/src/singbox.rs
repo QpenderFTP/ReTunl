@@ -74,6 +74,33 @@ impl WireSockLink {
     }
 }
 
+fn dns_strategy(s: &Settings) -> &'static str {
+    if s.ipv6 {
+        "prefer_ipv4"
+    } else {
+        "ipv4_only"
+    }
+}
+
+/// A DNS server given by name needs another one to find its address.
+fn needs_bootstrap(server: &Value) -> bool {
+    server.get("domain_resolver").is_some()
+}
+
+/// The resolver that finds the addresses of DNS servers given by name.
+fn bootstrap_dns(tls: bool) -> Value {
+    json!({"type": if tls { "tls" } else { "udp" }, "tag": DNS_BOOTSTRAP, "server": BOOTSTRAP_SERVER})
+}
+
+/// `spec` as it is, or with `tls` the same public resolver on its TLS port
+/// (853), when it is one we know has it.
+fn over_tls(spec: &str, tls: bool) -> String {
+    match dns::dot_ip(spec) {
+        Some(ip) if tls => format!("tls://{ip}"),
+        _ => spec.to_string(),
+    }
+}
+
 /// Ids of the servers some route uses: the default one or an enabled rule.
 fn used_ids(data: &AppData) -> Vec<&str> {
     let mut ids: Vec<&str> = Vec::new();
@@ -111,15 +138,11 @@ pub fn wiresock_profile(data: &AppData) -> Option<&Profile> {
 pub fn build_wiresock_helper(settings: &Settings, link: &WireSockLink, iface: Option<&str>) -> Res<Value> {
     // strict route closes port 53 outside the virtual adapter: the same resolver over TLS
     let strict = settings.mode == InboundMode::Tun && settings.tun.strict_route;
-    let spec = match dns::dot_ip(&settings.dns.remote) {
-        Some(ip) if strict => format!("tls://{ip}"),
-        _ => settings.dns.remote.clone(),
-    };
-    let remote = dns::server(&spec, DNS_REMOTE, None, DNS_BOOTSTRAP)
+    let remote = dns::server(&over_tls(&settings.dns.remote, strict), DNS_REMOTE, None, DNS_BOOTSTRAP)
         .map_err(|e| BuildError(format!("DNS через VPN: {e}")))?;
     let mut servers = vec![remote.clone()];
-    if remote.get("domain_resolver").is_some() {
-        servers.push(json!({"type": "udp", "tag": DNS_BOOTSTRAP, "server": BOOTSTRAP_SERVER}));
+    if needs_bootstrap(&remote) {
+        servers.push(bootstrap_dns(false));
     }
     let mut route = json!({"final": TAG_DIRECT, "default_domain_resolver": DNS_REMOTE});
     match iface.map(str::trim).filter(|i| !i.is_empty()) {
@@ -128,7 +151,7 @@ pub fn build_wiresock_helper(settings: &Settings, link: &WireSockLink, iface: Op
     }
     Ok(json!({
         "log": {"level": "warn", "timestamp": true},
-        "dns": {"servers": servers, "final": DNS_REMOTE, "strategy": if settings.ipv6 { "prefer_ipv4" } else { "ipv4_only" }},
+        "dns": {"servers": servers, "final": DNS_REMOTE, "strategy": dns_strategy(settings)},
         "inbounds": [{
             "type": "mixed",
             "tag": "proxy-in",
@@ -169,6 +192,16 @@ enum Target {
     Reject,
 }
 
+impl Target {
+    /// The tag of the server this sends to, unless it is direct or a block.
+    fn server(&self) -> Option<&str> {
+        match self {
+            Target::Outbound(tag) if tag != TAG_DIRECT => Some(tag),
+            _ => None,
+        }
+    }
+}
+
 struct Ctx<'a> {
     data: &'a AppData,
     os: Os,
@@ -180,6 +213,10 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
+    fn new(data: &'a AppData, os: Os) -> Ctx<'a> {
+        Ctx { data, os, tag_of: HashMap::new(), used_tags: HashSet::new(), rule_sets: BTreeMap::new(), warnings: Vec::new() }
+    }
+
     fn tag_for(&mut self, profile: &Profile) -> String {
         if let Some(t) = self.tag_of.get(&profile.id) {
             return t.clone();
@@ -272,6 +309,13 @@ impl Parts {
             }
         }
     }
+}
+
+/// A user rule ready for the config: what it matches and where it sends.
+struct UserRule {
+    parts: Parts,
+    match_all: bool,
+    target: Target,
 }
 
 /// How an app entry matches the program's full path.
@@ -616,7 +660,8 @@ fn with_action(mut m: Map<String, Value>, target: &Target) -> Value {
     Value::Object(m)
 }
 
-fn route_rule(parts: &Parts, match_all: bool, target: &Target) -> Value {
+fn route_rule(rule: &UserRule) -> Value {
+    let UserRule { parts, match_all, target } = rule;
     let both = !parts.apps.is_empty() && parts.has_dest();
     if both && !match_all {
         let mut a = Map::new();
@@ -640,8 +685,9 @@ fn route_rule(parts: &Parts, match_all: bool, target: &Target) -> Value {
 
 /// DNS rule for the domain part of a user rule, if it makes sense: DNS
 /// queries come from the Windows DNS service, so app conditions can't apply.
-fn dns_rule(parts: &Parts, match_all: bool, target: &Target, remote: Option<&str>) -> Option<Value> {
-    if match_all && !parts.apps.is_empty() {
+fn dns_rule(rule: &UserRule, remote: Option<&str>) -> Option<Value> {
+    let UserRule { parts, match_all, target } = rule;
+    if *match_all && !parts.apps.is_empty() {
         return None;
     }
     // a port-limited block must not kill name resolution for every port
@@ -676,28 +722,11 @@ fn dns_rule(parts: &Parts, match_all: bool, target: &Target, remote: Option<&str
     Some(Value::Object(m))
 }
 
-/// Full config for the main connection.
-pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
-    build_for(data, opts, Os::CURRENT)
-}
-
-/// [`build`] as it would be on `os`.
-pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
-    let s = &data.settings;
-    // Android has no system proxy for other apps: only the VPN
-    let mode = if os == Os::Android { InboundMode::Tun } else { s.mode };
-    let mut ctx = Ctx {
-        data,
-        os,
-        tag_of: HashMap::new(),
-        used_tags: HashSet::new(),
-        rule_sets: BTreeMap::new(),
-        warnings: Vec::new(),
-    };
-
-    // 1. user rules → route rules (also decides which servers are needed)
-    let final_target = ctx.target(&s.final_route, "Весь остальной трафик")?;
-    let mut user_rules: Vec<(Parts, bool, Target)> = Vec::new();
+/// The enabled rules, checked and split into sing-box matchers. The servers
+/// they send to get their tags here: that is what makes a server "used".
+fn checked_rules(ctx: &mut Ctx) -> Res<Vec<UserRule>> {
+    let data = ctx.data;
+    let mut out = Vec::new();
     for rule in data.rules.iter().filter(|r| r.enabled) {
         let label = format!("Правило «{}»", rule.name.trim());
         if rule.is_empty() {
@@ -705,31 +734,40 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
             continue;
         }
         let target = ctx.target(&rule.route, &label)?;
-        let parts = rule_parts(&mut ctx, rule)?;
-        user_rules.push((parts, rule.match_all, target));
+        let parts = rule_parts(ctx, rule)?;
+        out.push(UserRule { parts, match_all: rule.match_all, target });
     }
+    Ok(out)
+}
 
-    // Through which server the remote DNS goes
-    let remote_detour: Option<String> = match &final_target {
-        Target::Outbound(t) if t != TAG_DIRECT => Some(t.clone()),
-        _ => data
-            .active_profile()
-            .filter(|_| user_rules.iter().any(|(_, _, t)| matches!(t, Target::Outbound(x) if x != TAG_DIRECT)))
-            .map(|p| ctx.tag_for(p))
-            .or_else(|| {
-                user_rules.iter().find_map(|(_, _, t)| match t {
-                    Target::Outbound(x) if x != TAG_DIRECT => Some(x.clone()),
-                    _ => None,
-                })
-            }),
-    };
+/// The server «DNS через VPN» goes through: the one for all other traffic;
+/// else, when some rule sends to a server, the selected server, or without
+/// one the first server a rule names.
+fn dns_detour(ctx: &mut Ctx, final_target: &Target, user_rules: &[UserRule]) -> Option<String> {
+    if let Some(tag) = final_target.server() {
+        return Some(tag.to_string());
+    }
+    let first = user_rules.iter().find_map(|r| r.target.server())?;
+    Some(match ctx.data.active_profile() {
+        Some(p) => ctx.tag_for(p),
+        None => first.to_string(),
+    })
+}
 
-    // 2. route
+/// Route rules in the order sing-box checks them, and the tag of the outbound
+/// for everything they did not match.
+fn route_rules(
+    ctx: &Ctx,
+    mode: InboundMode,
+    wiresock: Option<&WireSockLink>,
+    user_rules: &[UserRule],
+    final_target: &Target,
+) -> (Vec<Value>, String) {
+    let s = &ctx.data.settings;
     let mut rules: Vec<Value> = Vec::new();
     if s.sniff {
         rules.push(json!({"action": "sniff"}));
     }
-    let wiresock = opts.wiresock.as_ref().filter(|_| os == Os::Windows);
     if wiresock.is_some() && mode == InboundMode::Tun {
         // WireSock's own packets go straight out. The helper is bound to the
         // network adapter and never reaches the tunnel; if it did, its traffic
@@ -742,7 +780,7 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
     }
     // A WireGuard server's own networks (AllowedIPs = 172.16.6.0/24) go to it,
     // before the local network rule keeps these private addresses home
-    for p in &data.profiles {
+    for p in &ctx.data.profiles {
         let Some(tag) = ctx.tag_of.get(&p.id) else { continue };
         let nets = wgconf::own_networks(&p.outbound);
         if !nets.is_empty() {
@@ -752,76 +790,105 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
     if s.bypass_lan {
         rules.push(json!({"ip_is_private": true, "action": "route", "outbound": TAG_DIRECT}));
     }
-    for (parts, match_all, target) in &user_rules {
-        rules.push(route_rule(parts, *match_all, target));
-    }
-    let final_tag = match &final_target {
+    rules.extend(user_rules.iter().map(route_rule));
+    let final_tag = match final_target {
         Target::Outbound(t) => t.clone(),
         Target::Reject => {
             rules.push(json!({"network": ["tcp", "udp"], "action": "reject"}));
             TAG_DIRECT.to_string()
         }
     };
+    (rules, final_tag)
+}
 
-    // 3. DNS
-    let mut dns_servers: Vec<Value> = Vec::new();
-    let mut need_bootstrap = false;
-    let dot = opts.direct_dns_tls && mode == InboundMode::Tun && s.tun.strict_route;
-    let direct_spec = match dns::dot_ip(&s.dns.direct) {
-        Some(ip) if dot => format!("tls://{ip}"),
-        _ => s.dns.direct.clone(),
-    };
-    let direct = dns::server(&direct_spec, DNS_DIRECT, None, DNS_BOOTSTRAP)
+/// The `dns` block: the resolver for direct traffic, the one behind the
+/// server (`remote_detour`), and which of them answers what.
+fn dns_section(
+    s: &Settings,
+    mode: InboundMode,
+    direct_dns_tls: bool,
+    user_rules: &[UserRule],
+    final_target: &Target,
+    remote_detour: Option<&str>,
+) -> Res<Value> {
+    let dot = direct_dns_tls && mode == InboundMode::Tun && s.tun.strict_route;
+    let direct = dns::server(&over_tls(&s.dns.direct, dot), DNS_DIRECT, None, DNS_BOOTSTRAP)
         .map_err(|e| BuildError(format!("DNS для прямого трафика: {e}")))?;
-    need_bootstrap |= direct.get("domain_resolver").is_some();
-    dns_servers.push(direct);
-    let remote_tag = match &remote_detour {
+    let mut need_bootstrap = needs_bootstrap(&direct);
+    let mut servers = vec![direct];
+    let remote_tag = match remote_detour {
         Some(detour) => {
             let remote = dns::server(&s.dns.remote, DNS_REMOTE, Some(detour), DNS_BOOTSTRAP)
                 .map_err(|e| BuildError(format!("DNS через VPN: {e}")))?;
-            need_bootstrap |= remote.get("domain_resolver").is_some();
-            dns_servers.push(remote);
+            need_bootstrap |= needs_bootstrap(&remote);
+            servers.push(remote);
             Some(DNS_REMOTE)
         }
         None => None,
     };
     if need_bootstrap {
-        dns_servers.push(json!({"type": if dot { "tls" } else { "udp" }, "tag": DNS_BOOTSTRAP, "server": BOOTSTRAP_SERVER}));
+        servers.push(bootstrap_dns(dot));
     }
-    let mut dns_rules: Vec<Value> = Vec::new();
-    for (parts, match_all, target) in &user_rules {
-        if let Some(r) = dns_rule(parts, *match_all, target, remote_tag) {
-            dns_rules.push(r);
-        }
-    }
+    let rules: Vec<Value> = user_rules.iter().filter_map(|r| dns_rule(r, remote_tag)).collect();
     let dns_final = match (s.dns.policy, remote_tag) {
         (DnsPolicy::Direct, _) | (_, None) => DNS_DIRECT,
         (DnsPolicy::Remote, Some(r)) => r,
-        (DnsPolicy::Auto, Some(r)) => {
-            if matches!(&final_target, Target::Outbound(t) if t != TAG_DIRECT) {
-                r
-            } else {
-                DNS_DIRECT
-            }
-        }
+        (DnsPolicy::Auto, Some(r)) if final_target.server().is_some() => r,
+        (DnsPolicy::Auto, Some(_)) => DNS_DIRECT,
     };
-    let mut dns_obj = Map::new();
-    dns_obj.insert("servers".into(), Value::Array(dns_servers));
-    if !dns_rules.is_empty() {
-        dns_obj.insert("rules".into(), Value::Array(dns_rules));
+    let mut dns = Map::new();
+    dns.insert("servers".into(), Value::Array(servers));
+    if !rules.is_empty() {
+        dns.insert("rules".into(), Value::Array(rules));
     }
-    dns_obj.insert("final".into(), json!(dns_final));
-    dns_obj.insert("strategy".into(), json!(if s.ipv6 { "prefer_ipv4" } else { "ipv4_only" }));
+    dns.insert("final".into(), json!(dns_final));
+    dns.insert("strategy".into(), json!(dns_strategy(s)));
+    Ok(Value::Object(dns))
+}
 
-    // 4. outbounds and endpoints (only servers that are actually used)
-    let mut direct_ob = Map::new();
-    direct_ob.insert("type".into(), json!("direct"));
-    direct_ob.insert("tag".into(), json!(TAG_DIRECT));
-    if let Some(iface) = s.direct_interface.as_deref().filter(|i| !i.trim().is_empty()) {
-        direct_ob.insert("bind_interface".into(), json!(iface.trim()));
+/// Servers the way sing-box lists them: WireGuard and Tailscale are
+/// `endpoints`, the rest are `outbounds`. `direct` always comes first.
+struct Servers {
+    outbounds: Vec<Value>,
+    endpoints: Vec<Value>,
+}
+
+impl Servers {
+    fn new(direct: Value) -> Servers {
+        Servers { outbounds: vec![direct], endpoints: Vec::new() }
     }
-    let mut outbounds = vec![Value::Object(direct_ob)];
-    let mut endpoints = Vec::new();
+
+    /// Add `p` under `tag`. `ob` is its stored settings, already fitted to the core.
+    fn add(&mut self, p: &Profile, mut ob: Map<String, Value>, tag: &str) {
+        wgconf::open_peer(&mut ob);
+        ob.insert("tag".into(), json!(tag));
+        if p.is_endpoint() {
+            self.endpoints.push(Value::Object(ob));
+        } else {
+            self.outbounds.push(Value::Object(ob));
+        }
+    }
+}
+
+/// The servers some route uses.
+struct Used {
+    servers: Servers,
+    /// Outbound tag → profile id.
+    tags: HashMap<String, String>,
+    /// The core they need.
+    core: CoreKind,
+}
+
+fn used_servers(ctx: &mut Ctx, wiresock: Option<&WireSockLink>, extended_available: bool) -> Res<Used> {
+    let data = ctx.data;
+    let s = &data.settings;
+    let mut direct = Map::new();
+    direct.insert("type".into(), json!("direct"));
+    direct.insert("tag".into(), json!(TAG_DIRECT));
+    if let Some(iface) = s.direct_interface.as_deref().filter(|i| !i.trim().is_empty()) {
+        direct.insert("bind_interface".into(), json!(iface.trim()));
+    }
+    let mut servers = Servers::new(Value::Object(direct));
     let mut tags = HashMap::new();
     let mut used: Vec<(&Profile, String)> = data
         .profiles
@@ -831,14 +898,14 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
     used.sort_by(|a, b| a.1.cmp(&b.1));
     let via_wiresock = |p: &Profile| wiresock.is_some_and(|w| w.profile_id == p.id);
     // WireSock runs its server itself: it asks nothing of the core
-    let core = choose_core(s.core, used.iter().map(|(p, _)| *p).filter(|p| !via_wiresock(p)), opts.extended_available)?;
+    let core = choose_core(s.core, used.iter().map(|(p, _)| *p).filter(|p| !via_wiresock(p)), extended_available)?;
     for (p, tag) in used {
+        tags.insert(tag.clone(), p.id.clone());
         if let Some(w) = wiresock.filter(|_| via_wiresock(p)) {
-            outbounds.push(w.outbound(&tag));
-            tags.insert(tag.clone(), p.id.clone());
+            servers.outbounds.push(w.outbound(&tag));
             continue;
         }
-        if p.uses_wiresock() && os != Os::Windows {
+        if p.uses_wiresock() && ctx.os != Os::Windows {
             ctx.warnings.push(format!("WireSock есть только в Windows: «{}» подключается обычным WireGuard.", p.name));
         } else if p.uses_wiresock() && wiresock.is_some() {
             ctx.warnings.push(format!(
@@ -861,56 +928,73 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
                 p.name
             ));
         }
-        wgconf::open_peer(&mut ob);
-        ob.insert("tag".into(), json!(tag));
-        tags.insert(tag.clone(), p.id.clone());
-        if p.is_endpoint() {
-            endpoints.push(Value::Object(ob));
-        } else {
-            outbounds.push(Value::Object(ob));
-        }
+        servers.add(p, ob, &tag);
     }
+    Ok(Used { servers, tags, core })
+}
 
-    // 5. inbounds
-    let inbound = match mode {
-        InboundMode::Tun => {
-            let mut address = vec![json!("172.19.0.1/30")];
-            if s.ipv6 {
-                address.push(json!("fdfe:dcba:9876::1/126"));
-            }
-            let stack = match s.tun.stack.as_str() {
-                "system" | "gvisor" | "mixed" => s.tun.stack.clone(),
-                _ => "mixed".into(),
-            };
-            let mut tun = json!({
-                "type": "tun",
-                "tag": "tun-in",
-                "address": address,
-                "mtu": s.tun.mtu.clamp(1280, 65535),
-                "auto_route": true,
-                "strict_route": s.tun.strict_route,
-                "stack": stack,
-            });
-            if let Some(w) = wiresock.filter(|w| !w.keep_out.is_empty()) {
-                tun["route_exclude_address"] = json!(w.keep_out);
-            }
-            // macOS names tunnels itself (utunN)
-            if os == Os::Windows {
-                let name = if s.tun.interface_name.trim().is_empty() { "ReTunl" } else { s.tun.interface_name.trim() };
-                tun["interface_name"] = json!(name);
-            }
-            tun
-        }
-        InboundMode::SystemProxy => json!({
+/// Where programs' traffic comes in: the virtual adapter or the local proxy.
+fn inbound_section(s: &Settings, mode: InboundMode, os: Os, wiresock: Option<&WireSockLink>) -> Value {
+    if mode == InboundMode::SystemProxy {
+        return json!({
             "type": "mixed",
             "tag": "mixed-in",
             "listen": "127.0.0.1",
             "listen_port": s.mixed_port,
             "set_system_proxy": true,
-        }),
+        });
+    }
+    let mut address = vec![json!("172.19.0.1/30")];
+    if s.ipv6 {
+        address.push(json!("fdfe:dcba:9876::1/126"));
+    }
+    let stack = match s.tun.stack.as_str() {
+        "system" | "gvisor" | "mixed" => s.tun.stack.clone(),
+        _ => "mixed".into(),
     };
+    let mut tun = json!({
+        "type": "tun",
+        "tag": "tun-in",
+        "address": address,
+        "mtu": s.tun.mtu.clamp(1280, 65535),
+        "auto_route": true,
+        "strict_route": s.tun.strict_route,
+        "stack": stack,
+    });
+    if let Some(w) = wiresock.filter(|w| !w.keep_out.is_empty()) {
+        tun["route_exclude_address"] = json!(w.keep_out);
+    }
+    // macOS names tunnels itself (utunN)
+    if os == Os::Windows {
+        let name = if s.tun.interface_name.trim().is_empty() { "ReTunl" } else { s.tun.interface_name.trim() };
+        tun["interface_name"] = json!(name);
+    }
+    tun
+}
 
-    // 6. rule sets
+/// Full config for the main connection.
+pub fn build(data: &AppData, opts: &BuildOptions) -> Res<Built> {
+    build_for(data, opts, Os::CURRENT)
+}
+
+/// [`build`] as it would be on `os`.
+pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
+    let s = &data.settings;
+    // Android has no system proxy for other apps: only the VPN
+    let mode = if os == Os::Android { InboundMode::Tun } else { s.mode };
+    let wiresock = opts.wiresock.as_ref().filter(|_| os == Os::Windows);
+    let mut ctx = Ctx::new(data, os);
+
+    // the rules come first: they decide which servers are needed
+    let final_target = ctx.target(&s.final_route, "Весь остальной трафик")?;
+    let user_rules = checked_rules(&mut ctx)?;
+    let remote_detour = dns_detour(&mut ctx, &final_target, &user_rules);
+
+    let (rules, final_tag) = route_rules(&ctx, mode, wiresock, &user_rules, &final_target);
+    let dns = dns_section(s, mode, opts.direct_dns_tls, &user_rules, &final_target, remote_detour.as_deref())?;
+    let Used { servers, tags, core } = used_servers(&mut ctx, wiresock, opts.extended_available)?;
+    let inbound = inbound_section(s, mode, os, wiresock);
+
     let rule_sets: Vec<RuleSetSource> = ctx.rule_sets.values().cloned().collect();
     let rule_set_json: Vec<Value> = rule_sets
         .iter()
@@ -945,11 +1029,11 @@ pub fn build_for(data: &AppData, opts: &BuildOptions, os: Os) -> Res<Built> {
 
     let mut config = Map::new();
     config.insert("log".into(), json!({"level": log_level(&s.log_level), "timestamp": true}));
-    config.insert("dns".into(), Value::Object(dns_obj));
+    config.insert("dns".into(), dns);
     config.insert("inbounds".into(), json!([inbound]));
-    config.insert("outbounds".into(), Value::Array(outbounds));
-    if !endpoints.is_empty() {
-        config.insert("endpoints".into(), Value::Array(endpoints));
+    config.insert("outbounds".into(), Value::Array(servers.outbounds));
+    if !servers.endpoints.is_empty() {
+        config.insert("endpoints".into(), Value::Array(servers.endpoints));
     }
     config.insert("route".into(), Value::Object(route));
     config.insert("experimental".into(), Value::Object(experimental));
@@ -976,7 +1060,7 @@ pub fn choose_core<'a>(
         }
         need = need.max(n);
     }
-    awg::pick_core(pref, need, extended_available).map_err(|_| {
+    awg::pick_core(pref, need, extended_available).ok_or_else(|| {
         let names: Vec<String> = strict
             .iter()
             .take(3)
@@ -1012,34 +1096,27 @@ fn log_level(l: &str) -> &'static str {
 pub fn build_probe(profiles: &[&Profile], settings: &Settings, port: u16, secret: &str, core: CoreKind) -> Res<Value> {
     let direct = dns::server(&settings.dns.direct, DNS_DIRECT, None, DNS_BOOTSTRAP)
         .map_err(|e| BuildError(format!("DNS: {e}")))?;
-    let mut servers = vec![direct.clone()];
-    if direct.get("domain_resolver").is_some() {
-        servers.push(json!({"type": "udp", "tag": DNS_BOOTSTRAP, "server": BOOTSTRAP_SERVER}));
+    let mut dns_servers = vec![direct.clone()];
+    if needs_bootstrap(&direct) {
+        dns_servers.push(bootstrap_dns(false));
     }
-    let mut outbounds = vec![json!({"type": "direct", "tag": TAG_DIRECT})];
-    let mut endpoints = Vec::new();
+    let mut servers = Servers::new(json!({"type": "direct", "tag": TAG_DIRECT}));
     for p in profiles {
         let Some(mut ob) = p.outbound.as_object().cloned() else { continue };
         if core == CoreKind::Official {
             awg::strip_for_official(&mut ob);
         }
-        wgconf::open_peer(&mut ob);
-        ob.insert("tag".into(), json!(p.id));
-        if p.is_endpoint() {
-            endpoints.push(Value::Object(ob));
-        } else {
-            outbounds.push(Value::Object(ob));
-        }
+        servers.add(p, ob, &p.id);
     }
     let mut config = json!({
         "log": {"level": "warn", "timestamp": true},
-        "dns": {"servers": servers, "final": DNS_DIRECT, "strategy": if settings.ipv6 { "prefer_ipv4" } else { "ipv4_only" }},
-        "outbounds": outbounds,
+        "dns": {"servers": dns_servers, "final": DNS_DIRECT, "strategy": dns_strategy(settings)},
+        "outbounds": servers.outbounds,
         "route": {"final": TAG_DIRECT, "auto_detect_interface": true, "default_domain_resolver": DNS_DIRECT},
         "experimental": {"clash_api": {"external_controller": format!("127.0.0.1:{port}"), "secret": secret}},
     });
-    if !endpoints.is_empty() {
-        config["endpoints"] = Value::Array(endpoints);
+    if !servers.endpoints.is_empty() {
+        config["endpoints"] = Value::Array(servers.endpoints);
     }
     Ok(config)
 }

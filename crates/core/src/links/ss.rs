@@ -27,7 +27,7 @@ const METHODS: &[&str] = &[
 /// SIP002 `ss://base64(method:pass)@host:port?plugin=…#name`,
 /// plain `ss://method:pass@host:port`, and legacy `ss://base64(method:pass@host:port)#name`.
 pub fn parse(link: &str) -> LinkResult {
-    let body = link.trim().splitn(2, "://").nth(1).unwrap_or("");
+    let body = link.trim().split_once("://").map_or("", |(_, rest)| rest);
     let (body, name) = match body.split_once('#') {
         Some((b, f)) => (b, pct_decode(f).trim().to_string()),
         None => (body, String::new()),

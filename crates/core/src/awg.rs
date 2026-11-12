@@ -115,19 +115,19 @@ pub fn need_reason(outbound: &Value) -> &'static str {
     }
 }
 
-/// Pick the core for a set of servers. `Err` means sing-box-lx is required
+/// Pick the core for a set of servers. `None` means sing-box-lx is required
 /// but not available (or switched off in settings).
-pub fn pick_core(pref: CorePref, need: CoreNeed, extended_available: bool) -> Result<CoreKind, ()> {
+pub fn pick_core(pref: CorePref, need: CoreNeed, extended_available: bool) -> Option<CoreKind> {
     match pref {
-        CorePref::Official if need == CoreNeed::Extended => Err(()),
-        CorePref::Official => Ok(CoreKind::Official),
-        CorePref::Extended if extended_available => Ok(CoreKind::Extended),
-        CorePref::Extended => Err(()),
+        CorePref::Official if need == CoreNeed::Extended => None,
+        CorePref::Official => Some(CoreKind::Official),
+        CorePref::Extended if extended_available => Some(CoreKind::Extended),
+        CorePref::Extended => None,
         CorePref::Auto => match need {
-            CoreNeed::Any => Ok(CoreKind::Official),
-            _ if extended_available => Ok(CoreKind::Extended),
-            CoreNeed::PreferExtended => Ok(CoreKind::Official),
-            CoreNeed::Extended => Err(()),
+            CoreNeed::Any => Some(CoreKind::Official),
+            _ if extended_available => Some(CoreKind::Extended),
+            CoreNeed::PreferExtended => Some(CoreKind::Official),
+            CoreNeed::Extended => None,
         },
     }
 }
@@ -176,14 +176,14 @@ mod tests {
     #[test]
     fn picking() {
         use CoreNeed::*;
-        assert_eq!(pick_core(CorePref::Auto, Any, true), Ok(CoreKind::Official));
-        assert_eq!(pick_core(CorePref::Auto, PreferExtended, true), Ok(CoreKind::Extended));
-        assert_eq!(pick_core(CorePref::Auto, PreferExtended, false), Ok(CoreKind::Official));
-        assert_eq!(pick_core(CorePref::Auto, Extended, false), Err(()));
-        assert_eq!(pick_core(CorePref::Official, PreferExtended, true), Ok(CoreKind::Official));
-        assert_eq!(pick_core(CorePref::Official, Extended, true), Err(()));
-        assert_eq!(pick_core(CorePref::Extended, Any, true), Ok(CoreKind::Extended));
-        assert_eq!(pick_core(CorePref::Extended, Any, false), Err(()));
+        assert_eq!(pick_core(CorePref::Auto, Any, true), Some(CoreKind::Official));
+        assert_eq!(pick_core(CorePref::Auto, PreferExtended, true), Some(CoreKind::Extended));
+        assert_eq!(pick_core(CorePref::Auto, PreferExtended, false), Some(CoreKind::Official));
+        assert_eq!(pick_core(CorePref::Auto, Extended, false), None);
+        assert_eq!(pick_core(CorePref::Official, PreferExtended, true), Some(CoreKind::Official));
+        assert_eq!(pick_core(CorePref::Official, Extended, true), None);
+        assert_eq!(pick_core(CorePref::Extended, Any, true), Some(CoreKind::Extended));
+        assert_eq!(pick_core(CorePref::Extended, Any, false), None);
     }
 
     #[test]

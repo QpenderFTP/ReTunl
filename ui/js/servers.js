@@ -2,7 +2,7 @@
 
 import {
   h, icon, invoke, busy, toast, errorToast, errText, dialog, confirmDialog, promptDialog, popMenu,
-  pageHead, fmtAgo, fmtBytes, fmtDate, now, plural, banner, seg, toggle,
+  pageHead, fmtAgo, fmtBytes, fmtDate, now, plural, banner, formError, showError,
 } from './lib.js';
 import {
   store, D, S, act, refresh, protoParts, addressOf, importText, importClipboard, importFile, copyText,
@@ -10,6 +10,8 @@ import {
 } from './store.js';
 import { exportDialog } from './transfer.js';
 import { speedTestThrough } from './overview.js';
+import { wiresockDialog } from './wiresock.js';
+import { ciscoTag, loadCisco, ciscoDialog, ciscoLogin, ciscoLogout } from './cisco.js';
 
 let pasteHandler = null;
 let lxBar = null;
@@ -237,7 +239,7 @@ async function removeProfile(p) {
 
 function editJson(p) {
   const ta = h('textarea.textarea.mono.code', { rows: 18, spellcheck: false, value: JSON.stringify(p.outbound, null, 2) });
-  const err = h('p.form-error', { hidden: true });
+  const err = formError();
   const save = h('button.btn.primary', {
     onclick: () => busy(save, async () => {
       try {
@@ -246,8 +248,7 @@ function editJson(p) {
         await refresh();
         toast('Настройки сервера сохранены');
       } catch (e) {
-        err.hidden = false;
-        err.textContent = errText(e);
+        showError(err, e);
       }
     }),
   }, 'Сохранить');
@@ -260,115 +261,14 @@ function editJson(p) {
   });
 }
 
-// ---------- WireSock ----------
-
-const WS_SITE = 'https://www.wiresock.net/';
-const WS_MASKS = [
-  { value: '', label: 'Нет' },
-  { value: 'quic', label: 'QUIC' },
-  { value: 'dns', label: 'DNS' },
-  { value: 'sip', label: 'SIP' },
-  { value: 'stun', label: 'STUN' },
-];
-const WS_BROWSERS = [['', 'Как решит WireSock'], ['chrome', 'Chrome'], ['firefox', 'Firefox'], ['curl', 'curl']];
-
-/** A WireGuard server through WireSock VPN Client: masking and junk packets. */
-function wiresockDialog(p) {
-  const ws = { enabled: false, domain: '', protocol: '', browser: '', junk_delay: 0, ...(p.wiresock || {}) };
-  const o = p.outbound;
-  let mask = ws.protocol;
-
-  const num = (id, value, max, label) => h('input.input.num-input', {
-    id, type: 'number', min: 0, max, step: 1, inputMode: 'numeric', value: String(value || 0), 'aria-label': label,
-  });
-  const on = toggle(ws.enabled, paint, { id: 'ws-on' });
-  const domain = h('input.input#ws-domain', { value: ws.domain, placeholder: 'ozon.ru', spellcheck: false, autocapitalize: 'off', maxLength: 253 });
-  const browser = h('select.select#ws-browser', WS_BROWSERS.map(([v, label]) => h('option', { value: v }, label)));
-  browser.value = ws.browser;
-  const jc = num('ws-jc', o.jc, 128);
-  const jmin = num('ws-jmin', o.jmin, 1280, 'Наименьший размер, байт');
-  const jmax = num('ws-jmax', o.jmax, 1280, 'Наибольший размер, байт');
-  const jd = num('ws-jd', ws.junk_delay, 1000);
-  const err = h('p.form-error', { hidden: true });
-
-  const field = (id, label, ctl, note) => h('div.field', h('label.field-label', { htmlFor: id }, label), ctl, note && h('p.field-note', note));
-  const domainField = field('ws-domain', 'Сайт', domain, 'Популярный в вашей стране сайт: пакеты будут похожи на обращения к нему.');
-  const browserField = field('ws-browser', 'Как браузер', browser);
-  const junkSize = h('div.ws-junk-size', jmin, h('span', '—'), jmax);
-  const opts = h('div.form-stack.ws-opts',
-    h('div.field',
-      h('span.field-label#ws-mask-label', 'Маскировка'),
-      seg(WS_MASKS, mask, (v) => { mask = v; paint(); }, { label: 'Маскировка' }),
-      h('p.field-note', 'Под что WireSock подделывает пакеты перед рукопожатием WireGuard.')),
-    h('div.form-row.ws-mask', domainField, browserField),
-    h('div.field',
-      h('span.field-label', 'Мусорные пакеты'),
-      h('div.form-row.ws-junk',
-        field('ws-jc', 'Сколько', jc),
-        h('div.field', h('span.field-label', 'Размер, байт'), junkSize),
-        field('ws-jd', 'Пауза, мс', jd)),
-      h('p.field-note', 'Случайные пакеты перед рукопожатием, их шлёт только клиент: сервер настраивать не нужно. 0 — без них.')));
-
-  function paint() {
-    domainField.hidden = !mask;
-    browserField.hidden = mask !== 'quic';
-  }
-
-  const installed = !!store.view.wiresock;
-  const notes = [];
-  if (!installed) {
-    notes.push(banner('warn', 'WireSock VPN Client не установлен',
-      'Поставьте его с сайта WireSock: ReTunl найдёт программу сам. Настройки можно сохранить заранее.',
-      [h('button.btn.small', { type: 'button', onclick: () => invoke('open_url', { url: WS_SITE }).catch(errorToast) }, icon('external'), 'Открыть сайт')]));
-  } else if (!store.view.elevated) {
-    notes.push(banner('warn', 'Нужны права администратора',
-      'WireSock работает только когда ReTunl запущен с правами администратора: включите это в настройках.'));
-  }
-
-  const save = h('button.btn.primary', {
-    onclick: () => busy(save, async () => {
-      err.hidden = true;
-      const int = (el) => Math.max(0, Math.floor(Number(el.value) || 0));
-      const wiresock = {
-        enabled: on.checked,
-        protocol: mask,
-        domain: mask ? domain.value.trim() : '',
-        browser: mask === 'quic' ? browser.value : '',
-        junk_delay: int(jd),
-      };
-      try {
-        await invoke('set_wiresock', { id: p.id, wiresock, junk: { jc: int(jc), jmin: int(jmin), jmax: int(jmax) } });
-        dl.close();
-        await refresh();
-        toast(wiresock.enabled ? `«${p.name}» подключается через WireSock` : 'Настройки WireSock сохранены');
-      } catch (e) {
-        err.hidden = false;
-        err.textContent = errText(e);
-      }
-    }),
-  }, 'Сохранить');
-
-  const dl = dialog({
-    title: `WireSock для «${p.name}»`,
-    lead: 'WireSock VPN Client сам подключает этот сервер и прячет WireGuard от блокировок. Остальные серверы и правила работают как прежде.',
-    body: h('div.form-stack.ws-form',
-      notes,
-      h('label.ws-on', { htmlFor: 'ws-on' },
-        h('span.ws-on-text', h('span.field-label', 'Подключать через WireSock'),
-          h('span.field-note', 'Через WireSock идёт один сервер за раз.')),
-        on),
-      opts, err),
-    actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), save],
-  });
-  paint();
-}
+// ---------- adding ----------
 
 export function addDialog() {
   const ta = h('textarea.textarea.mono#add-text', {
     rows: 7, spellcheck: false,
     placeholder: 'vless://…\nhy2://…\nvpn://… (ключ AmneziaVPN)\nhttps://… (адрес подписки)\nили содержимое файла WireGuard или AmneziaWG .conf',
   });
-  const err = h('p.form-error', { hidden: true });
+  const err = formError();
   const submit = h('button.btn.primary', {
     onclick: () => {
       const text = ta.value.trim();
@@ -380,8 +280,7 @@ export function addDialog() {
           await refresh();
           reportImport(sum);
         } catch (e) {
-          err.hidden = false;
-          err.textContent = errText(e);
+          showError(err, e);
         }
       });
     },
@@ -446,170 +345,6 @@ export async function adapterDialog() {
         h('div.adapter-addr', addrs.join(', ') || 'нет адресов')),
       btn);
   }));
-}
-
-// ---------- Cisco Secure Client ----------
-
-const CISCO_STATES = {
-  connected: ['Cisco: вход выполнен', ''],
-  connecting: ['Cisco: подключается', '.muted'],
-  disconnected: ['Cisco: не подключён', '.muted'],
-};
-
-/** The tag on a Cisco server: Cisco's state, filled in when it is known. */
-function ciscoTag() {
-  const t = h('span.tag.cisco-state', { title: 'Состояние Cisco Secure Client' });
-  paintCiscoTag(t);
-  return t;
-}
-
-function paintCiscoTag(t) {
-  if (!store.view.cisco) {
-    t.className = 'tag warn cisco-state';
-    t.textContent = 'Cisco не установлен';
-    return;
-  }
-  const st = store.cisco && CISCO_STATES[store.cisco.state];
-  t.className = 'tag cisco-state' + (st ? st[1].replace('.', ' ') : ' muted');
-  t.textContent = st ? st[0] : 'Cisco';
-}
-
-/** Ask vpncli for Cisco's state (at most every 15 seconds unless `force`). */
-async function loadCisco(force) {
-  if (!store.view.cisco) return;
-  if (!force && store.ciscoAt && Date.now() - store.ciscoAt < 15000) return;
-  store.ciscoAt = Date.now();
-  try {
-    store.cisco = await invoke('cisco_status');
-  } catch {
-    store.cisco = null;
-  }
-  document.querySelectorAll('.cisco-state').forEach(paintCiscoTag);
-}
-
-function ciscoSet(state) {
-  store.cisco = { ...(store.cisco || {}), state };
-  store.ciscoAt = Date.now();
-  document.querySelectorAll('.cisco-state').forEach(paintCiscoTag);
-}
-
-function ciscoMissing() {
-  return store.view.cisco ? null : banner('warn', 'Cisco Secure Client не установлен',
-    'Его выдаёт ваша организация. Установите программу, и ReTunl найдёт её сам. Сервер можно добавить заранее.');
-}
-
-/** Add a Cisco Secure Client server (`p` = null) or change one. */
-function ciscoDialog(p) {
-  const c = { host: '', group: '', username: '', disconnect: false, ...((p && p.cisco) || {}) };
-  const input = (id, value, attrs = {}) => h('input.input#' + id, { value, spellcheck: false, autocapitalize: 'off', maxLength: 200, ...attrs });
-  const name = input('cs-name', p ? p.name : 'Cisco', { maxLength: 80 });
-  const host = input('cs-host', c.host, { placeholder: 'vpn.company.ru' });
-  const grp = input('cs-group', c.group, { placeholder: 'Если сервер спрашивает' });
-  const user = input('cs-user', c.username, { autocomplete: 'username' });
-  const off = toggle(c.disconnect, () => {}, { id: 'cs-off' });
-  const err = h('p.form-error', { hidden: true });
-  const field = (id, label, ctl, note) => h('div.field', h('label.field-label', { htmlFor: id }, label), ctl, note && h('p.field-note', note));
-
-  const save = h('button.btn.primary', {
-    onclick: () => busy(save, async () => {
-      err.hidden = true;
-      const cisco = { host: host.value.trim(), group: grp.value.trim(), username: user.value.trim(), disconnect: off.checked };
-      try {
-        await invoke('save_cisco', { id: p ? p.id : null, name: name.value.trim(), cisco });
-        dl.close();
-        await refresh();
-        toast(p ? 'Настройки Cisco сохранены' : `«${name.value.trim() || 'Cisco'}» добавлен в серверы`);
-      } catch (e) {
-        err.hidden = false;
-        err.textContent = errText(e);
-      }
-    }),
-  }, p ? 'Сохранить' : 'Добавить');
-
-  const dl = dialog({
-    title: p ? `Cisco для «${p.name}»` : 'Cisco Secure Client',
-    lead: 'ReTunl сам входит в Cisco Secure Client и отправляет в него трафик правил, которые ведут на этот сервер. Остальное идёт как раньше.',
-    body: h('div.form-stack.cisco-form',
-      ciscoMissing(),
-      field('cs-name', 'Название в ReTunl', name),
-      field('cs-host', 'Сервер Cisco', host, 'Адрес или название из списка в окне Cisco.'),
-      h('div.form-row.cisco-pair',
-        field('cs-group', 'Группа', grp),
-        field('cs-user', 'Логин', user)),
-      h('label.ws-on', { htmlFor: 'cs-off' },
-        h('span.ws-on-text', h('span.field-label', 'Выходить из Cisco при отключении ReTunl'),
-          h('span.field-note', 'Иначе Cisco остаётся подключённым.')),
-        off),
-      h('p.field-note', 'Пароль ReTunl спрашивает при каждом входе и нигде не хранит.'),
-      err),
-    actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), save],
-  });
-}
-
-/** Log in to Cisco Secure Client for `p`; `after` runs once logged in (a connection). */
-export function ciscoLogin(p, after) {
-  const c = p.cisco || {};
-  const pass = h('input.input#cs-pass', { type: 'password', autocomplete: 'current-password' });
-  const second = h('input.input#cs-second', { autocomplete: 'one-time-code', spellcheck: false, autocapitalize: 'off', placeholder: 'push или код' });
-  const err = h('p.form-error', { hidden: true });
-  const field = (id, label, ctl, note) => h('div.field', h('label.field-label', { htmlFor: id }, label), ctl, note && h('p.field-note', note));
-
-  const go = h('button.btn.primary', {
-    disabled: !store.view.cisco,
-    onclick: () => busy(go, async () => {
-      err.hidden = true;
-      try {
-        await invoke('cisco_login', { id: p.id, password: pass.value, second: second.value.trim() });
-        pass.value = '';
-        dl.close();
-        ciscoSet('connected');
-        toast('Вход в Cisco Secure Client выполнен');
-        if (after) after();
-      } catch (e) {
-        err.hidden = false;
-        err.textContent = errText(e);
-        loadCisco(true);
-      }
-    }),
-  }, after ? 'Войти и подключить' : 'Войти');
-  pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); });
-  second.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); });
-
-  const inUi = h('button.btn', {
-    disabled: !store.view.cisco,
-    onclick: async () => {
-      try {
-        await invoke('cisco_open');
-        dl.close();
-        toast('Войдите в окне Cisco Secure Client', { detail: after ? 'Потом снова нажмите «Подключить» в ReTunl.' : '' });
-      } catch (e) {
-        errorToast(e);
-      }
-    },
-  }, icon('external'), 'Войти в окне Cisco');
-
-  const dl = dialog({
-    title: 'Вход в Cisco Secure Client',
-    lead: `Сервер ${c.host}${c.group ? ', группа ' + c.group : ''}${c.username ? ', логин ' + c.username : ''}. Пароль уйдёт только в Cisco и нигде не сохранится.`,
-    body: h('div.form-stack.cisco-form',
-      ciscoMissing(),
-      field('cs-pass', 'Пароль', pass),
-      field('cs-second', 'Второй пароль', second, 'Если сервер просит подтверждение: push для Duo или код из SMS или приложения.'),
-      h('p.field-note', 'Вход через браузер (SAML), по сертификату или с проверкой компьютера (ISE Posture) работает только в окне Cisco. Если окно Cisco открыто, на время входа ReTunl его закроет.'),
-      err),
-    actions: [inUi, h('button.btn', { onclick: () => dl.close() }, 'Отмена'), go],
-  });
-  setTimeout(() => pass.focus(), 50);
-}
-
-async function ciscoLogout() {
-  try {
-    await invoke('cisco_logout');
-    ciscoSet('disconnected');
-    toast('Выход из Cisco Secure Client выполнен');
-  } catch (e) {
-    errorToast(e);
-  }
 }
 
 function attachDrop(el) {

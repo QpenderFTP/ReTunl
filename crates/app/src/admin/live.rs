@@ -60,7 +60,7 @@ fn profile(key: &ClientKey) -> Profile {
     } else {
         parse_link(&key.text).expect("the link parses")
     };
-    Profile { id: "live".into(), name: l.name, outbound: l.outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None }
+    Profile::new("live", l.name, l.outbound)
 }
 
 /// This computer's public address as the internet sees it through `key`.

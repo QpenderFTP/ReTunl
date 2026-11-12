@@ -1,7 +1,7 @@
 // Правила: ordered list (first match wins), the rule editor and templates.
 
 import {
-  h, s, icon, invoke, busy, toast, errorToast, errText, dialog, confirmDialog, popMenu, pageHead, seg, plural,
+  h, s, icon, invoke, busy, toast, errorToast, errText, formError, showError, dialog, confirmDialog, popMenu, pageHead, seg, plural,
 } from './lib.js';
 import {
   store, D, S, act, refresh, routeChip, routePicker, appIcon, appLabel, iconPath, loadIcons, ensureProcIndex, isMac, isAndroid,
@@ -465,7 +465,7 @@ export function openRuleEditor(rule, { asPreset = false, onSaved } = {}) {
     matchBox.hidden = !(r.apps.length && (domains.length || ips.length || r.rule_sets.length));
   }
 
-  const err = h('p.form-error', { hidden: true });
+  const err = formError();
   const save = h('button.btn.primary', { onclick: () => submit() }, asPreset ? 'Сохранить шаблон' : isNew ? 'Добавить правило' : 'Сохранить');
   async function submit() {
     const { domains, ips } = splitDest(dest.value);
@@ -499,8 +499,7 @@ export function openRuleEditor(rule, { asPreset = false, onSaved } = {}) {
         await refresh();
         toast(isNew ? `Правило «${out.name}» добавлено` : 'Правило сохранено');
       } catch (e) {
-        err.hidden = false;
-        err.textContent = errText(e);
+        showError(err, e);
       }
     });
   }

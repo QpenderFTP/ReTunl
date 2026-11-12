@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use serde::Serialize;
 use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
 
+use crate::util::locked;
+
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
@@ -266,7 +268,7 @@ pub fn install_ctrl_guard() {
 /// system proxy itself.
 pub fn send_ctrl_break(pid: u32) -> bool {
     use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
-    let _guard = CONSOLE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = locked(&CONSOLE);
     unsafe {
         FreeConsole();
         if AttachConsole(pid) == 0 {

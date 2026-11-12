@@ -2,7 +2,7 @@
 // an export sealed with a password, and its import.
 
 import {
-  h, icon, invoke, busy, toast, errText, dialog, fmtDate, plural,
+  h, icon, invoke, busy, toast, dialog, fmtDate, plural, field, formError, showError,
 } from './lib.js';
 import {
   store, D, refresh, protoParts, copyText, here,
@@ -70,8 +70,8 @@ export function exportDialog() {
   }
 
   const { pw, pw2, show } = passwordFields(true);
-  const err = h('p.form-error', { hidden: true });
-  const fail = (text) => { err.hidden = false; err.textContent = text; };
+  const err = formError();
+  const fail = (e) => showError(err, e);
 
   async function run(btn, toFile) {
     err.hidden = true;
@@ -97,7 +97,7 @@ export function exportDialog() {
           await copyText(res.text, 'Экспорт скопирован в буфер обмена');
         }
       } catch (e) {
-        fail(errText(e));
+        fail(e);
       }
     });
   }
@@ -114,8 +114,8 @@ export function exportDialog() {
         group('Добавлены вручную', manual),
         extra.length ? group('Ещё', extra, { all: false }) : null),
       h('div.tr-password',
-        h('div.field', h('label.field-label', { htmlFor: 'tr-pw' }, 'Пароль'), pw),
-        h('div.field', h('label.field-label', { htmlFor: 'tr-pw2' }, 'Повторите пароль'), pw2),
+        field('tr-pw', 'Пароль', pw),
+        field('tr-pw2', 'Повторите пароль', pw2),
         show),
       h('p.field-note', 'Пароль нигде не сохраняется, без него экспорт не открыть. Шифрование — Argon2id и XChaCha20-Poly1305; чем длиннее пароль, тем труднее его подобрать.'),
       err,
@@ -132,7 +132,7 @@ export function openBundleImport(text) {
   const { pw, show } = passwordFields(false);
   pw.autocomplete = 'current-password';
   pw.placeholder = '';
-  const err = h('p.form-error', { hidden: true });
+  const err = formError();
   const open = h('button.btn.primary', {
     onclick: () => {
       if (!pw.value) { pw.focus(); return; }
@@ -143,8 +143,7 @@ export function openBundleImport(text) {
           dl.close();
           chooseDialog(opened);
         } catch (e) {
-          err.hidden = false;
-          err.textContent = errText(e);
+          showError(err, e);
           pw.select();
         }
       });
@@ -154,7 +153,7 @@ export function openBundleImport(text) {
   const dl = dialog({
     title: 'Экспорт ReTunl',
     lead: 'Введите пароль, который задали при экспорте.',
-    body: [h('div.field', h('label.field-label', { htmlFor: 'tr-pw' }, 'Пароль'), pw), h('div.tr-show', show), err],
+    body: [field('tr-pw', 'Пароль', pw), h('div.tr-show', show), err],
     actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), open],
   });
   pw.focus();
@@ -175,7 +174,7 @@ function chooseDialog({ bundle: b, existing }) {
   const extra = [rulesPick, presetsPick].filter(Boolean);
   const nothingNew = [...subs, ...manual].every((x) => x.cb.disabled) && !extra.length;
 
-  const err = h('p.form-error', { hidden: true });
+  const err = formError();
   const go = h('button.btn.primary', {
     disabled: nothingNew,
     onclick: () => busy(go, async () => {
@@ -192,8 +191,7 @@ function chooseDialog({ bundle: b, existing }) {
         await refresh();
         reportMerged(m);
       } catch (e) {
-        err.hidden = false;
-        err.textContent = errText(e);
+        showError(err, e);
       }
     }),
   }, 'Импортировать');

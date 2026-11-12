@@ -23,6 +23,7 @@ mod store;
 mod sys;
 #[cfg(desktop)]
 mod tray;
+mod util;
 mod wiresock;
 
 use std::sync::Arc;
@@ -135,7 +136,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let tray = tray::build(&handle)?;
-                *state.tray.lock().unwrap_or_else(|e| e.into_inner()) = Some(tray);
+                *util::locked(&state.tray) = Some(tray);
             }
 
             let h = handle.clone();
@@ -205,7 +206,7 @@ pub fn run() {
                     .collect();
                 for id in stale {
                     let _ = s.handle.get().map(|h| h.emit("subscriptions-updating", &id));
-                    let r = api::update_subscription_for(&s, &id).await;
+                    let r = api::subscriptions::update_for(&s, &id).await;
                     if let Err(e) = r {
                         s.engine.log_app("WARN", &e);
                     }
@@ -227,64 +228,64 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            api::get_state,
-            api::get_catalog,
-            api::import_text,
-            api::import_clipboard,
-            api::import_file,
-            api::add_subscription,
-            api::update_subscription,
-            api::update_all_subscriptions,
-            api::rename_subscription,
-            api::delete_subscription,
-            api::set_active,
-            api::rename_profile,
-            api::set_wiresock,
-            api::save_cisco,
-            api::cisco_status,
-            api::cisco_login,
-            api::cisco_logout,
-            api::cisco_open,
-            api::set_profile_json,
-            api::delete_profiles,
-            api::add_interface,
-            api::list_adapters,
-            api::test_latency,
-            api::speed_test,
-            api::save_rule,
-            api::delete_rule,
-            api::set_rule_enabled,
-            api::reorder_rules,
-            api::add_preset,
-            api::save_preset,
-            api::delete_preset,
-            api::export_bundle,
-            api::open_bundle,
-            api::import_bundle,
-            api::update_settings,
-            api::preview_config,
-            api::connect,
-            api::disconnect,
-            api::poll,
-            api::close_connection,
-            api::close_all_connections,
-            api::get_logs,
-            api::clear_logs,
-            api::list_processes,
-            api::get_icons,
-            api::pick_exe,
-            api::pick_folder,
-            api::copy_text,
-            api::relaunch_admin,
-            api::set_autostart,
-            api::download_core,
-            api::update_rule_sets,
-            api::geo_tags,
-            api::open_data_dir,
-            api::open_url,
-            api::set_system_bars,
-            api::app_ready,
-            api::quit_app,
+            api::view::get_state,
+            api::view::get_catalog,
+            api::import::import_text,
+            api::import::import_clipboard,
+            api::import::import_file,
+            api::subscriptions::add_subscription,
+            api::subscriptions::update_subscription,
+            api::subscriptions::update_all_subscriptions,
+            api::subscriptions::rename_subscription,
+            api::subscriptions::delete_subscription,
+            api::servers::set_active,
+            api::servers::rename_profile,
+            api::servers::set_wiresock,
+            api::cisco::save_cisco,
+            api::cisco::cisco_status,
+            api::cisco::cisco_login,
+            api::cisco::cisco_logout,
+            api::cisco::cisco_open,
+            api::servers::set_profile_json,
+            api::servers::delete_profiles,
+            api::servers::add_interface,
+            api::servers::list_adapters,
+            api::servers::test_latency,
+            api::servers::speed_test,
+            api::rules::save_rule,
+            api::rules::delete_rule,
+            api::rules::set_rule_enabled,
+            api::rules::reorder_rules,
+            api::rules::add_preset,
+            api::rules::save_preset,
+            api::rules::delete_preset,
+            api::transfer::export_bundle,
+            api::transfer::open_bundle,
+            api::transfer::import_bundle,
+            api::settings::update_settings,
+            api::settings::preview_config,
+            api::connection::connect,
+            api::connection::disconnect,
+            api::connection::poll,
+            api::connection::close_connection,
+            api::connection::close_all_connections,
+            api::connection::get_logs,
+            api::connection::clear_logs,
+            api::system::list_processes,
+            api::system::get_icons,
+            api::system::pick_exe,
+            api::system::pick_folder,
+            api::system::copy_text,
+            api::system::relaunch_admin,
+            api::system::set_autostart,
+            api::system::download_core,
+            api::system::update_rule_sets,
+            api::system::geo_tags,
+            api::system::open_data_dir,
+            api::system::open_url,
+            api::system::set_system_bars,
+            api::system::app_ready,
+            api::system::quit_app,
             admin::commands::admin_servers,
             admin::commands::admin_add,
             admin::commands::admin_scan,

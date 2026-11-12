@@ -28,6 +28,8 @@ pub use install::{Plan, Progress};
 pub use scan::Scan;
 use ssh::{q, Auth, Session, Target};
 
+use crate::util::locked;
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     #[serde(rename = "awg")]
@@ -262,7 +264,7 @@ impl Admin {
     }
 
     fn saved(&self) -> std::sync::MutexGuard<'_, Vec<Saved>> {
-        self.saved.lock().unwrap_or_else(|e| e.into_inner())
+        locked(&self.saved)
     }
 
     /// Change the list and write it; nothing changes if writing fails.
@@ -284,11 +286,11 @@ impl Admin {
     }
 
     fn lock_for(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.locks.lock().unwrap_or_else(|e| e.into_inner()).entry(id.to_string()).or_default().clone()
+        locked(&self.locks).entry(id.to_string()).or_default().clone()
     }
 
     fn view(&self, s: &Saved) -> ServerView {
-        let look = self.looks.lock().unwrap_or_else(|e| e.into_inner()).get(&s.id).cloned().unwrap_or_default();
+        let look = locked(&self.looks).get(&s.id).cloned().unwrap_or_default();
         ServerView {
             id: s.id.clone(),
             name: s.name.clone(),
@@ -313,7 +315,7 @@ impl Admin {
     }
 
     fn remember(&self, id: &str, r: &Result<Scan, String>) {
-        let mut looks = self.looks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut looks = locked(&self.looks);
         let look = looks.entry(id.to_string()).or_default();
         match r {
             Ok(s) => {
@@ -521,7 +523,7 @@ impl Admin {
             all.retain(|x| x.id != id);
             Ok(())
         })?;
-        self.looks.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        locked(&self.looks).remove(id);
         Ok(())
     }
 

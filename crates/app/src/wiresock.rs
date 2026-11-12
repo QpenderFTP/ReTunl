@@ -530,16 +530,7 @@ mod tests {
     #[test]
     fn tests_go_through_the_tunnel_of_their_server() {
         let link = WireSockLink { profile_id: "a".into(), port: 1080, username: "u".into(), password: "p".into(), keep_out: vec![] };
-        let p = |id: &str| Profile {
-            id: id.into(),
-            name: id.into(),
-            outbound: serde_json::json!({"type": "wireguard"}),
-            subscription: None,
-            link: None,
-            created_at: 0,
-            wiresock: None,
-            cisco: None,
-        };
+        let p = |id: &str| Profile::new(id, id, serde_json::json!({"type": "wireguard"}));
         let a = through_tunnel(p("a"), Some(&link));
         assert_eq!(a.outbound["type"], "socks");
         assert_eq!(a.outbound["server_port"], 1080);

@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager, Wry};
 
 use crate::engine::{Phase, Status};
 use crate::state::AppState;
+use crate::util::locked;
 
 const ICON_ON: &[u8] = include_bytes!("../icons/tray-on.png");
 const ICON_OFF: &[u8] = include_bytes!("../icons/tray-off.png");
@@ -60,7 +61,7 @@ pub fn update(app: &AppHandle, status: &Status) {
         let _ = tray.set_tooltip(Some(&tooltip));
     }
     let state = app.state::<Arc<AppState>>();
-    let guard = state.tray.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = locked(&state.tray);
     if let Some(t) = guard.as_ref() {
         let text = if matches!(status.phase, Phase::Running | Phase::Starting) { "Отключить" } else { "Подключить" };
         let _ = t.toggle.set_text(text);

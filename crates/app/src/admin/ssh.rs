@@ -8,6 +8,8 @@ use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{self, HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect};
 
+use crate::util::locked;
+
 /// Start of the error when the server's host key is not the remembered one.
 pub const HOST_KEY_CHANGED: &str = "Ключ SSH сервера изменился";
 
@@ -58,7 +60,7 @@ impl client::Handler for Client {
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let fp = key.public_key().fingerprint(HashAlg::Sha256).to_string();
         let ok = self.pinned.as_deref().is_none_or(|p| p == fp);
-        *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(fp);
+        *locked(&self.seen) = Some(fp);
         Ok(ok)
     }
 }
@@ -95,7 +97,7 @@ pub async fn connect(t: Target<'_>) -> Result<Session, String> {
     let handler = Client { pinned: t.pinned.map(str::to_string), seen: seen.clone() };
     let addr = (t.host.trim_start_matches('[').trim_end_matches(']'), t.port);
     let connected = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, addr, handler)).await;
-    let fingerprint = || seen.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
+    let fingerprint = || locked(&seen).clone().unwrap_or_default();
     let mut handle = match connected {
         Err(_) => return Err(format!("{}:{} не ответил за {} с", t.host, t.port, CONNECT_TIMEOUT.as_secs())),
         Ok(Err(russh::Error::UnknownKey)) => {
