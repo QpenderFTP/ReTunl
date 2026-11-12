@@ -98,7 +98,7 @@
     logs.push({ seq: ++seq, time: d.toTimeString().slice(0, 8), level, source, text });
     if (logs.length > 4000) logs.shift();
   };
-  log('info', 'ReTunl 0.2.4 запущен', 'app');
+  log('info', 'ReTunl 0.2.5 запущен', 'app');
 
   const setStatus = (s) => { status = { ...status, ...s }; emit('status', clone(status)); };
 
@@ -378,7 +378,7 @@
 
   const handlers = {
     ...adminHandlers,
-    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.4', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed, speed_targets: SPEED_TARGETS, wiresock: /nows/.test(location.hash) ? null : 'C:\\Program Files\\WireSock VPN Client\\bin\\wiresock-client.exe', cisco: /nocisco/.test(location.hash) || MAC || ANDROID ? null : 'C:\\Program Files (x86)\\Cisco\\Cisco Secure Client\\vpncli.exe' }),
+    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', needs: needs() }, latency, autostart, version: '0.2.5', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed, speed_targets: SPEED_TARGETS, wiresock: /nows/.test(location.hash) ? null : 'C:\\Program Files\\WireSock VPN Client\\bin\\wiresock-client.exe', cisco: /nocisco/.test(location.hash) || MAC || ANDROID ? null : 'C:\\Program Files (x86)\\Cisco\\Cisco Secure Client\\vpncli.exe' }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });
