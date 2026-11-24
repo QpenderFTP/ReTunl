@@ -80,7 +80,7 @@ pub fn parse(text: &str, name: &str) -> Result<WgImport, LinkError> {
     let mut section = String::new();
     let mut iface: Vec<(String, String)> = Vec::new();
     let mut peers: Vec<Vec<(String, String)>> = Vec::new();
-    for raw in text.lines() {
+    for raw in text.trim_start_matches('\u{feff}').lines() {
         // WireSock keeps its own options in comments other clients skip
         let raw = raw.trim();
         let raw = raw.strip_prefix("#@ws:").unwrap_or(raw);
@@ -529,6 +529,12 @@ Endpoint = vpn.example.com:51820
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 ";
+
+    #[test]
+    fn utf8_bom_before_interface() {
+        let with_bom = format!("\u{feff}{}", CONF.trim_start());
+        assert_eq!(parse(&with_bom, "test").unwrap().profile.outbound, parse(CONF, "test").unwrap().profile.outbound);
+    }
 
     #[test]
     fn plain_wireguard() {

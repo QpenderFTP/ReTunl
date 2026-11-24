@@ -1,6 +1,5 @@
-//! `vpn://` keys exported by AmneziaVPN: base64url of a Qt `qCompress`ed JSON
-//! (4-byte big-endian length + zlib). For AmneziaWG and WireGuard containers
-//! the JSON carries the ready client `.conf` in `last_config`.
+//! `vpn://` keys carry a base64url-encoded client `.conf` (3x-ui) or an
+//! AmneziaVPN JSON container with the client configuration in `last_config`.
 
 use std::io::Read;
 
@@ -13,6 +12,12 @@ pub fn parse(link: &str) -> LinkResult {
     let body = link.trim();
     let body = body.get(6..).unwrap_or("").trim(); // after "vpn://"
     let raw = b64_decode(body).ok_or("ключ vpn:// повреждён: это не base64")?;
+    if let Ok(conf) = std::str::from_utf8(&raw) {
+        let conf = conf.trim_start_matches('\u{feff}');
+        if conf.lines().any(|line| line.trim().eq_ignore_ascii_case("[Interface]")) {
+            return Ok(crate::wgconf::parse(conf, "")?.profile);
+        }
+    }
     let json = decode_payload(&raw).ok_or("ключ vpn:// повреждён: не удалось распаковать")?;
     let v: Value = serde_json::from_slice(&json).map_err(|_| LinkError::Invalid("ключ vpn:// повреждён: внутри не JSON".into()))?;
     from_json(&v)
@@ -113,6 +118,19 @@ mod tests {
     }
 
     const CONF: &str = "[Interface]\nAddress = 10.8.1.2/32\nDNS = $PRIMARY_DNS\nPrivateKey = OOrcz46udUCWEuue7YueYT6OGhchZ91v0NqtRu+W2FI=\nJc = 3\nJmin = 10\nJmax = 40\nS1 = 20\nS2 = 30\nS3 = 16\nS4 = 12\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\nHeaderProtectionKey = KIKOZNzj+d+G5Gw84nfLm49oM/f+xMoThA4AEOqyZkc=\n\n[Peer]\nPublicKey = xqz8eGLSa0P5JHkSTGnKoczKZjmonaUDbbx8bUqRjWw=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 203.0.113.7:39000\nPersistentKeepalive = 25\n";
+
+    #[test]
+    fn imports_3x_ui_client_link_like_its_conf() {
+        let conf = CONF.replace("$PRIMARY_DNS", "1.1.1.1").replace("[Peer]", "# Test peer\r\n[Peer]");
+        let expected = crate::wgconf::parse(&conf, "").unwrap().profile;
+        let link = format!("vpn://{}", URL_SAFE_NO_PAD.encode(conf.as_bytes()));
+        assert!(admin_access(&link).is_none());
+        let result = crate::subscription::parse_text(&link);
+        assert!(result.errors.is_empty(), "{:?}", result.errors.first().map(|e| &e.1));
+        assert_eq!(result.profiles.len(), 1);
+        assert_eq!(result.profiles[0].outbound, expected.outbound);
+        assert_eq!(result.links, vec![Some(link)]);
+    }
 
     #[test]
     fn awg_key() {
