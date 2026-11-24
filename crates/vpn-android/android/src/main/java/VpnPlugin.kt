@@ -55,6 +55,11 @@ class UrlArgs {
 }
 
 @InvokeArg
+class UpdateArgs {
+    lateinit var path: String
+}
+
+@InvokeArg
 class BarsArgs {
     var dark: Boolean = false
 }
@@ -264,6 +269,33 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(JSObject())
         } catch (e: Exception) {
             invoke.reject("Не нашлось браузера, чтобы открыть ссылку")
+        }
+    }
+
+    @Command
+    fun allowInstallUpdate(invoke: Invoke) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) {
+            try {
+                activity.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + activity.packageName)))
+                invoke.reject("Разрешите установку из ReTunl, затем вернитесь и нажмите «Установить» ещё раз.")
+            } catch (e: Exception) {
+                invoke.reject("Android не разрешил установку обновлений: ${e.message}")
+            }
+        } else invoke.resolve(JSObject())
+    }
+
+    @Command
+    fun installUpdate(invoke: Invoke) {
+        try {
+            val file = java.io.File(invoke.parseArgs(UpdateArgs::class.java).path).canonicalFile
+            require(file.name == "ReTunl-update.apk" && file.toPath().startsWith(activity.cacheDir.canonicalFile.toPath()))
+            val uri = androidx.core.content.FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
+            activity.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            invoke.resolve(JSObject())
+        } catch (e: Exception) {
+            invoke.reject("Не удалось открыть установщик Android: ${e.message}")
         }
     }
 

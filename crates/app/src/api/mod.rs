@@ -16,6 +16,7 @@ pub mod settings;
 pub mod subscriptions;
 pub mod system;
 pub mod transfer;
+pub mod updates;
 pub mod view;
 
 type St<'a> = State<'a, Arc<AppState>>;

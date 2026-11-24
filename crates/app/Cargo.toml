@@ -27,6 +27,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 reqwest = { version = "0.12", default-features = false, features = ["json", "gzip"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+semver = "1"
+tempfile = "3"
 dirs = "6"
 png = "0.17"
 # managing your own servers over SSH

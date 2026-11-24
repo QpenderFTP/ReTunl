@@ -123,3 +123,11 @@ pub fn system_bars(dark: bool) -> Result<(), String> {
 pub fn open_url(url: &str) -> Result<(), String> {
     call::<Value>("openUrl", json!({ "url": url })).map(|_| ())
 }
+
+pub fn allow_install_update() -> Result<(), String> {
+    call::<Value>("allowInstallUpdate", json!({})).map(|_| ())
+}
+
+pub fn install_update(path: &str) -> Result<(), String> {
+    call::<Value>("installUpdate", json!({ "path": path })).map(|_| ())
+}

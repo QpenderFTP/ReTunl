@@ -15,6 +15,7 @@ import { rules } from './rules.js';
 import { activity } from './activity.js';
 import { logs } from './logs.js';
 import { settingsPage, applyTheme } from './settings.js';
+import { checkUpdate, installUpdate } from './updates.js';
 
 const PAGES = [overview, servers, myServers, rules, activity, logs, settingsPage];
 const page = () => PAGES.find((p) => p.id === store.page) || overview;
@@ -281,7 +282,12 @@ async function init() {
 
   setInterval(poll, 1000);
   setInterval(tickClock, 1000);
-  invoke('app_ready');
+  const update = await invoke('app_ready');
+  if (update) {
+    navigate('settings');
+    installUpdate(update);
+  } else checkUpdate();
+  setInterval(checkUpdate, 12 * 60 * 60 * 1000);
 }
 
 init();

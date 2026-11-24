@@ -172,13 +172,14 @@ pub fn set_system_bars(dark: bool) -> R<()> {
 
 /// The page has loaded: show the window unless we started hidden in the tray.
 #[tauri::command]
-pub fn app_ready(app: AppHandle, st: St<'_>) {
+pub fn app_ready(app: AppHandle, st: St<'_>) -> Option<String> {
     if !st.hidden_launch {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
             let _ = w.set_focus();
         }
     }
+    locked(&st.update_on_ready).take()
 }
 
 #[tauri::command]

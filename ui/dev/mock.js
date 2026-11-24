@@ -603,6 +603,8 @@
     },
     open_data_dir: () => {},
     open_url: () => {},
+    check_update: () => location.hash.includes('update') ? '0.3.0' : null,
+    install_update: () => wait(400),
     app_ready: () => {},
     quit_app: () => {},
   };

@@ -108,6 +108,10 @@ pub fn run() {
     }
     let autostart = args.iter().any(|a| a == "--autostart");
     let connect_now = args.iter().any(|a| a == "--connect");
+    #[cfg(windows)]
+    let update = arg_value(&args, "--install-update").filter(|v| semver::Version::parse(v).is_ok());
+    #[cfg(not(windows))]
+    let update: Option<String> = None;
 
     sys::install_ctrl_guard();
 
@@ -128,8 +132,9 @@ pub fn run() {
             let paths = paths::Paths::for_app(&handle);
             let (data, warning) = store::load(&paths.data_file());
             let hidden = autostart && data.settings.start_minimized;
-            let auto_connect = connect_now || data.settings.connect_on_launch;
+            let auto_connect = update.is_none() && (connect_now || data.settings.connect_on_launch);
             let state = Arc::new(AppState::new(paths, data, warning, hidden));
+            *util::locked(&state.update_on_ready) = update;
             app.manage(state.clone());
             let _ = state.handle.set(handle.clone());
 
@@ -286,6 +291,8 @@ pub fn run() {
             api::system::set_system_bars,
             api::system::app_ready,
             api::system::quit_app,
+            api::updates::check_update,
+            api::updates::install_update,
             admin::commands::admin_servers,
             admin::commands::admin_add,
             admin::commands::admin_scan,

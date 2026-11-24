@@ -32,6 +32,7 @@ pub struct AppState {
     pub warning: Mutex<Option<String>>,
     /// Started by autostart / minimized: keep the window in the tray.
     pub hidden_launch: bool,
+    pub update_on_ready: Mutex<Option<String>>,
     pub speed: Mutex<Option<SpeedResult>>,
     /// Held while a speed test runs.
     pub speed_lock: tokio::sync::Mutex<()>,
@@ -45,6 +46,7 @@ impl AppState {
         let admin = crate::admin::Admin::new(paths.data_dir.join("my-servers.json"));
         AppState {
             hidden_launch,
+            update_on_ready: Mutex::new(None),
             paths,
             data: Mutex::new(data),
             engine,

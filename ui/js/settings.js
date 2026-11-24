@@ -7,6 +7,7 @@ import {
   store, S, ST, act, refresh, downloadCore, copyText, isOn, paintCoreBar, importFile, isMac, isAndroid, osName, here,
 } from './store.js';
 import { exportDialog } from './transfer.js';
+import { updateControl } from './updates.js';
 
 const coreBars = { official: null, extended: null };
 
@@ -230,6 +231,7 @@ export const settingsPage = {
     ]));
 
     root.append(section('Программа', [
+      setRow('Обновления ReTunl', 'Проверка GitHub Releases при запуске и каждые 12 часов.', updateControl()),
       setRow('Оформление', null, seg([{ value: 'system', label: `Как в ${osName()}` }, { value: 'light', label: 'Светлое' }, { value: 'dark', label: 'Тёмное' }], getTheme(), (t) => {
         try { localStorage.setItem('theme', t); } catch { /* private mode */ }
         applyTheme(t);

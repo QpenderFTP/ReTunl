@@ -110,12 +110,21 @@ jobs:
       # one .dmg for both Apple Silicon and Intel Macs, signed ad hoc (no Apple Developer ID)
       - name: Installer
         working-directory: crates/app
-        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles dmg
+        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app,dmg
+
+      - name: Package for in-app updates
+        run: |
+          bundle=target/universal-apple-darwin/release/bundle
+          version=$(jq -r .version crates/app/tauri.conf.json)
+          pkgbuild --component "$bundle/macos/ReTunl.app" --install-location /Applications \
+            --identifier app.retunl.desktop --version "$version" "$bundle/dmg/ReTunl_${version}_universal.pkg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ReTunl-macos
-          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/universal-apple-darwin/release/bundle/dmg/*.pkg
           if-no-files-found: error
 
   android:
