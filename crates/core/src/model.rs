@@ -17,9 +17,9 @@ pub struct Profile {
     pub link: Option<String>,
     #[serde(default)]
     pub created_at: i64,
-    /// Use the optional Xray VLESS transport on Windows.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub xray: bool,
+    /// Manual VLESS transport choice. Older profiles omitted the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xray: Option<bool>,
     /// WireGuard through WireSock VPN Client (Windows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiresock: Option<WireSock>,
@@ -74,7 +74,7 @@ pub const PROXY_TYPES: &[&str] = &[
 impl Profile {
     /// A server with only its connection: no subscription, link or extras.
     pub fn new(id: impl Into<String>, name: impl Into<String>, outbound: Value) -> Profile {
-        Profile { id: id.into(), name: name.into(), outbound, subscription: None, link: None, created_at: 0, xray: false, wiresock: None, cisco: None }
+        Profile { id: id.into(), name: name.into(), outbound, subscription: None, link: None, created_at: 0, xray: None, wiresock: None, cisco: None }
     }
 
     pub fn protocol(&self) -> &str {
@@ -82,7 +82,12 @@ impl Profile {
     }
 
     pub fn uses_xray(&self) -> bool {
-        cfg!(windows) && self.xray && self.protocol() == "vless"
+        self.uses_xray_on(crate::util::Os::CURRENT)
+    }
+
+    pub(crate) fn uses_xray_on(&self, os: crate::util::Os) -> bool {
+        os == crate::util::Os::Windows && self.protocol() == "vless"
+            && self.xray.unwrap_or_else(|| crate::xray::vless(&self.outbound).is_ok())
     }
 
     pub fn is_endpoint(&self) -> bool {

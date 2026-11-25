@@ -58,8 +58,8 @@ pub fn set_profile_json(st: St<'_>, id: String, json: String) -> R<()> {
     st.mutate(|d| {
         let p = d.profile_mut(&id).ok_or("Сервер не найден")?;
         if !vless {
-            p.xray = false;
-        } else if p.uses_xray() {
+            p.xray = None;
+        } else if cfg!(windows) && p.xray == Some(true) {
             retunl_core::xray::vless(&v)?;
         }
         p.outbound = v;
@@ -74,16 +74,22 @@ pub fn set_xray(st: St<'_>, id: String, enabled: bool) -> R<()> {
     if enabled && (!cfg!(windows) || !st.paths.xray_path().is_file()) {
         return Err("Сначала установите Xray-core для Windows.".into());
     }
-    st.mutate(|d| {
+    let changed = st.mutate(|d| {
         let p = d.profile_mut(&id).ok_or("Сервер не найден")?;
+        if p.protocol() != "vless" {
+            return Err("Выбор ядра доступен для VLESS.".into());
+        }
         if enabled {
             retunl_core::xray::vless(&p.outbound)?;
         }
-        p.xray = enabled;
-        Ok(())
+        let changed = p.uses_xray() != enabled;
+        p.xray = Some(enabled);
+        Ok(changed)
     })?;
-    locked(&st.latency).remove(&id);
-    st.request_reload();
+    if changed {
+        locked(&st.latency).remove(&id);
+        st.request_reload();
+    }
     Ok(())
 }
 

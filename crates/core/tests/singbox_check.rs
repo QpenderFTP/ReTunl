@@ -313,7 +313,10 @@ fn amneziawg_and_xhttp_need_sing_box_lx() {
     let awg = wgconf::parse(conf, "AWG 3.1").unwrap().profile;
     let mut d = AppData::default();
     d.profiles.push(Profile::new("awg", awg.name, awg.outbound));
-    d.profiles.push(profile("xh", "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&type=xhttp&path=%2Fxh&mode=auto&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#XHTTP"));
+    d.profiles.push(Profile {
+        xray: Some(false),
+        ..profile("xh", "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?security=tls&type=xhttp&path=%2Fxh&mode=auto&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#XHTTP")
+    });
     d.settings.active_profile = Some("awg".into());
     d.rules.push(Rule { id: "r".into(), name: "curl".into(), enabled: true, apps: vec!["curl.exe".into()], route: Route::Profile { id: "xh".into() }, ..Default::default() });
     let opts = |lx: bool| BuildOptions { ruleset_dir: dir.clone(), controller_secret: "x".into(), cache_file: None, extended_available: lx, direct_dns_tls: false, wiresock: None };

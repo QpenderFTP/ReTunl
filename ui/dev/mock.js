@@ -83,6 +83,7 @@
   const usedCisco = () => data.profiles.filter((p) => p.cisco && usedIds().has(p.id));
   // #android: the phone build (packages instead of programs, the core built in)
   const ANDROID = /android/.test(location.hash);
+  const usesXray = p => !ANDROID && !MAC && p.outbound.type === 'vless' && p.xray !== false;
   if (ANDROID) { core = 'встроено'; lxCore = 'встроено'; }
   let logs = [];
   let seq = 0;
@@ -379,7 +380,7 @@
 
   const handlers = {
     ...adminHandlers,
-    get_state:() => ({ data, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', xray_installed: xrayInstalled, xray_version: '26.11.9', needs: needs() }, latency, autostart, version: '0.2.8', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed, speed_targets: SPEED_TARGETS, wiresock: /nows/.test(location.hash) ? null : 'C:\\Program Files\\WireSock VPN Client\\bin\\wiresock-client.exe', cisco: /nocisco/.test(location.hash) || MAC || ANDROID ? null : 'C:\\Program Files (x86)\\Cisco\\Cisco Secure Client\\vpncli.exe' }),
+    get_state:() => ({ data: { ...data, profiles: data.profiles.map(p => ({ ...p, xray: usesXray(p) })) }, status, elevated: !/user/.test(location.hash), core: { path: core, expected: '1.14.4', lx_path: lxCore, lx_expected: '1.14.4-lx.32', xray_installed: xrayInstalled, xray_version: '26.11.9', needs: needs() }, latency, autostart, version: '0.2.8', data_dir: ANDROID ? '/data/user/0/app.retunl/files' : MAC ? '/Users/me/Library/Application Support/ReTunl' : 'C:\\Users\\me\\AppData\\Roaming\\ReTunl', portable: false, warning: null, platform: ANDROID ? 'android' : MAC ? 'macos' : 'windows', blocks: clone(blocks), speed, speed_targets: SPEED_TARGETS, wiresock: /nows/.test(location.hash) ? null : 'C:\\Program Files\\WireSock VPN Client\\bin\\wiresock-client.exe', cisco: /nocisco/.test(location.hash) || MAC || ANDROID ? null : 'C:\\Program Files (x86)\\Cisco\\Cisco Secure Client\\vpncli.exe' }),
     get_catalog: () => CATALOG,
     import_text: ({ text }) => {
       if (text.trim().startsWith('retunl-bundle:')) return summary({ bundle: text.trim() });
@@ -451,6 +452,7 @@
       { name: 'Беспроводная сеть', description: 'Intel Wi-Fi 6 AX201', up: false, addresses: ['169.254.96.62'], tunnel: false },
     ],
     test_latency: async ({ ids }) => {
+      if (data.profiles.some(p => (!ids || ids.includes(p.id)) && usesXray(p))) xrayInstalled = true;
       await wait(900);
       const res = {};
       for (const p of data.profiles) if (!ids || ids.includes(p.id)) res[p.id] = Math.random() < 0.15 ? { ms: null, error: 'нет ответа', at: now() } : { ms: 40 + Math.floor(Math.random() * 300), error: null, at: now() };
@@ -529,7 +531,8 @@
       log('info', 'sing-box started (0.41s)');
       log('warn', 'dns: lookup failed for telemetry.example: context deadline exceeded');
       const ap = data.profiles.find((p) => p.id === data.settings.active_profile);
-      if (ap && !ap.xray && needs()[ap.id] === 'extended' && !lxCore) {
+      if (data.profiles.some(p => usedIds().has(p.id) && usesXray(p))) xrayInstalled = true;
+      if (ap && !usesXray(ap) && needs()[ap.id] === 'extended' && !lxCore) {
         const why = ap.outbound.type === 'wireguard' ? 'AmneziaWG' : 'XHTTP';
         setStatus({ phase: 'failed', step: null, error: `Сервер «${ap.name}» (${why}) работает только через ядро sing-box-lx. Скачайте его в «Настройки» → «Ядро и списки».` });
         throw status.error;
@@ -589,6 +592,7 @@
       const sp = data.settings.speed;
       const byId = (pid) => data.profiles.find((p) => p.id === pid);
       const ap = byId(profile) || byId(sp.profile) || byId(data.settings.active_profile);
+      if (ap && usesXray(ap)) xrayInstalled = true;
       const all = [...SPEED_TARGETS.map((t) => ({ id: t.id, name: t.city ? `${t.name}, ${t.city}` : t.name })), ...sp.custom];
       const picked = all.filter((t) => sp.targets.includes(t.id));
       const part = async (stage, top, auto, ping) => {

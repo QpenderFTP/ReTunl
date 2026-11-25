@@ -183,6 +183,7 @@ pub async fn run(
 ) -> Result<SpeedResult, String> {
     let profiles: Vec<Profile> = profile.iter().cloned().collect();
     let (kind, core) = probe::pick(paths, settings, &profiles)?;
+    let xray_error = probe::prepare_xray(paths, &profiles).await;
     let profile_name = profile.as_ref().map(|p| {
         if cfg!(windows) && p.protocol() == "vless" {
             format!("{} ({})", p.name, if p.uses_xray() { "Xray-core" } else { "sing-box" })
@@ -192,7 +193,7 @@ pub async fn run(
     });
     let mut vpn_error = None;
     let vpn_profile = match profile {
-        Some(p) => match probe::unsupported(paths, kind, &p) {
+        Some(p) => match probe::unsupported(paths, kind, &p, xray_error.as_deref()) {
             Some(e) => {
                 vpn_error = Some(e);
                 None

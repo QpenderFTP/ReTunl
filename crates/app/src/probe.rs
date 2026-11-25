@@ -54,12 +54,18 @@ pub fn pick(paths: &Paths, settings: &Settings, profiles: &[Profile]) -> Result<
     Ok((kind, core))
 }
 
+/// Download once per batch and let the other profiles run even if GitHub is unavailable.
+pub async fn prepare_xray(paths: &Paths, profiles: &[Profile]) -> Option<String> {
+    if profiles.iter().any(Profile::uses_xray) {
+        return crate::fetch::install_xray(&paths.xray_path()).await.err();
+    }
+    None
+}
+
 /// Why a server can't be tested on `kind`, if it can't.
-pub fn unsupported(paths: &Paths, kind: CoreKind, p: &Profile) -> Option<String> {
+pub fn unsupported(paths: &Paths, kind: CoreKind, p: &Profile, xray_error: Option<&str>) -> Option<String> {
     if p.uses_xray() {
-        return if paths.xray_path().is_file() { retunl_core::xray::vless(&p.outbound).err() } else {
-            Some("Установите Xray-core в меню VLESS-сервера.".into())
-        };
+        return retunl_core::xray::vless(&p.outbound).err().or_else(|| xray_error.map(str::to_owned));
     }
     if kind == CoreKind::Extended || p.core_need() != CoreNeed::Extended {
         return None;
@@ -151,10 +157,11 @@ pub async fn measure(
     job: Option<&sys::Job>,
 ) -> Result<HashMap<String, Latency>, String> {
     let (kind, core) = pick(paths, settings, &profiles)?;
+    let xray_error = prepare_xray(paths, &profiles).await;
     let mut results = HashMap::new();
     let mut runnable = Vec::new();
     for p in profiles {
-        match unsupported(paths, kind, &p) {
+        match unsupported(paths, kind, &p, xray_error.as_deref()) {
             Some(error) => {
                 results.insert(p.id, Latency { ms: None, error: Some(error), at: now_unix() });
             }

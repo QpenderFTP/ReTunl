@@ -161,7 +161,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub const XRAY_VERSION: &str = "26.11.9";
 
 /// Download the pinned Xray release and publish only the verified executable.
-pub async fn install_xray(http: &reqwest::Client, path: &Path) -> Result<(), String> {
+pub async fn install_xray(path: &Path) -> Result<(), String> {
+    // Connecting and measuring latency can request the same first download.
+    static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    if path.is_file() { return Ok(()); }
+    let _guard = INSTALL.lock().await;
     let (asset, sha) = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => ("Xray-windows-64.zip", "1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d"),
         ("windows", "aarch64") => ("Xray-windows-arm64-v8a.zip", "9fdd48ff890e54ffdc37f92df9037c940fe4d4f914755b70cc644b97e9678a83"),
@@ -169,7 +173,8 @@ pub async fn install_xray(http: &reqwest::Client, path: &Path) -> Result<(), Str
     };
     if path.is_file() { return Ok(()); }
     let url = format!("https://github.com/XTLS/Xray-core/releases/download/v{XRAY_VERSION}/{asset}");
-    let bytes = verified_archive(http, &url, sha, |_, _| {}).await?;
+    let bytes = verified_archive(&http_client(), &url, sha, |_, _| {}).await
+        .map_err(|e| format!("Не удалось скачать Xray-core: {e}. Повторите попытку или выберите sing-box в меню VLESS-сервера."))?;
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut exe = zip.by_name("xray.exe").map_err(|e| e.to_string())?;
     let dir = path.parent().ok_or("Нет папки для Xray-core")?;

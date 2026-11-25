@@ -550,6 +550,10 @@ impl Engine {
 
         let plan = xray::for_connection(&mut built, data)?;
         if plan.is_some() {
+            if !paths.xray_path().is_file() {
+                self.set_step("Скачиваю Xray-core…");
+                fetch::install_xray(&paths.xray_path()).await?;
+            }
             self.set_step("Запускаю Xray-core…");
             self.log_app("INFO", &format!("VLESS через Xray-core {}", fetch::XRAY_VERSION));
         }

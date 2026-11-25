@@ -219,6 +219,29 @@ fn transport(tr: &Value, stream: &mut Value) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::links::parse_link;
+    use crate::{util::Os, Profile};
+
+    #[test]
+    fn default_transport_for_saved_profiles() {
+        let mut saved = json!({"id":"v", "name":"VLESS", "outbound":{
+            "type":"vless", "server":"vpn.test", "server_port":443,
+            "uuid":"7ef29c14-680a-4a42-8801-6f05fcd73474"
+        }});
+        let read = |value: &Value| serde_json::from_value::<Profile>(value.clone()).unwrap();
+        let legacy = read(&saved);
+        assert!(legacy.uses_xray_on(Os::Windows));
+        assert!(!legacy.uses_xray_on(Os::MacOs));
+        assert!(!legacy.uses_xray_on(Os::Android));
+        saved["xray"] = json!(false);
+        assert!(!read(&serde_json::to_value(read(&saved)).unwrap()).uses_xray_on(Os::Windows));
+        saved["xray"] = json!(true);
+        assert!(read(&saved).uses_xray_on(Os::Windows));
+        saved["outbound"]["type"] = json!("trojan");
+        assert!(!read(&saved).uses_xray_on(Os::Windows));
+        let mut incompatible = legacy;
+        incompatible.outbound["bind_interface"] = json!("Ethernet");
+        assert!(!incompatible.uses_xray_on(Os::Windows));
+    }
 
     #[test]
     fn imported_reality_xhttp_keeps_transport_options() {

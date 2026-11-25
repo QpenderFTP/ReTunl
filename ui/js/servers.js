@@ -166,8 +166,8 @@ function row(p) {
 function vlessCoreDialog(p) {
   const core = store.view.core;
   const select = h('select.select#vless-core',
-    h('option', { value: 'sing-box' }, 'sing-box'),
-    h('option', { value: 'xray' }, 'Xray-core'));
+    h('option', { value: 'xray' }, 'Xray-core'),
+    h('option', { value: 'sing-box' }, 'sing-box'));
   select.value = p.xray ? 'xray' : 'sing-box';
   const note = h('p.field-note');
   const err = formError();
@@ -183,7 +183,7 @@ function vlessCoreDialog(p) {
         core.xray_installed = true;
       }
       if (!dl.el.open) return;
-      if (enabled !== !!p.xray || install) await invoke('set_xray', { id: p.id, enabled });
+      await invoke('set_xray', { id: p.id, enabled });
       dl.close();
       await refresh();
     } catch (e) {

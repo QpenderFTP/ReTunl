@@ -70,7 +70,14 @@ pub struct View {
 
 #[tauri::command]
 pub fn get_state(st: St<'_>) -> View {
-    let data = st.snapshot();
+    let mut data = st.snapshot();
+    // The UI shows the effective transport. Keep the stored preference optional
+    // so a subscription can change transport parameters on its next refresh.
+    for p in &mut data.profiles {
+        if p.protocol() == "vless" {
+            p.xray = Some(p.uses_xray());
+        }
+    }
     let needs = core_needs(&data);
     View {
         data,

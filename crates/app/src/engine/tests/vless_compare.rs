@@ -60,14 +60,8 @@ fn tun_routes_selected_profiles_only() {
         "vless://7ef29c14-680a-4a42-8801-6f05fcd73474@vpn.test:443?type=xhttp&security=tls",
     )
     .unwrap();
-    data.profiles.push(Profile {
-        xray: true,
-        ..Profile::new("selected", "XHTTP", parsed.outbound.clone())
-    });
-    data.profiles.push(Profile {
-        xray: true,
-        ..Profile::new("unused", "Unused", parsed.outbound)
-    });
+    data.profiles.push(Profile::new("selected", "XHTTP", parsed.outbound.clone()));
+    data.profiles.push(Profile::new("unused", "Unused", parsed.outbound));
     data.settings.mode = InboundMode::Tun;
     data.settings.active_profile = Some("selected".into());
     data.settings.final_route = Route::Proxy;
@@ -194,8 +188,9 @@ async fn switch_and_measure() {
         .build()
         .unwrap();
     let engine = Arc::new(Engine::new(None));
-    for enabled in [false, true, false] {
-        data.profiles[0].xray = enabled;
+    for choice in [None, Some(false), Some(true)] {
+        data.profiles[0].xray = choice;
+        let enabled = choice.unwrap_or(true);
         let req = StartRequest {
             data: data.clone(),
             paths: paths.clone(),

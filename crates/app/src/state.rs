@@ -175,7 +175,7 @@ pub fn merge_subscription(data: &mut AppData, sub_id: &str, items: Vec<ParsedLin
         fresh.push(Profile {
             subscription: Some(sub_id.to_string()),
             created_at: created,
-            xray: item.outbound["type"] == "vless" && found.is_some_and(|p| p.xray),
+            xray: found.filter(|p| p.protocol() == "vless" && item.outbound["type"] == "vless").and_then(|p| p.xray),
             wiresock,
             ..Profile::new(id, item.name, item.outbound)
         });
@@ -213,4 +213,29 @@ pub fn forget_profiles(data: &mut AppData, removed: &[String], fallback: Option<
         }
     }
     fixed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_refresh_keeps_only_explicit_vless_choices() {
+        let mut data = AppData::default();
+        let servers = || ["one", "two", "three"].map(|name| ParsedLink {
+            name: name.to_owned(),
+            outbound: serde_json::json!({"type":"vless", "server":name, "server_port":443, "uuid":"id"}),
+        });
+        merge_subscription(&mut data, "sub", servers().into());
+        assert!(data.profiles.iter().all(|p| p.xray.is_none()));
+        data.profiles[1].xray = Some(false);
+        data.profiles[2].xray = Some(true);
+        merge_subscription(&mut data, "sub", servers().into());
+        assert_eq!(data.profiles.iter().map(|p| p.xray).collect::<Vec<_>>(), [None, Some(false), Some(true)]);
+
+        let mut changed = servers();
+        changed[1].outbound["type"] = "trojan".into();
+        merge_subscription(&mut data, "sub", changed.into());
+        assert_eq!(data.profiles[1].xray, None);
+    }
 }
