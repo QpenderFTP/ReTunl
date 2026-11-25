@@ -25,6 +25,7 @@ mod sys;
 mod tray;
 mod util;
 mod wiresock;
+mod xray;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,6 +247,8 @@ pub fn run() {
             api::servers::set_active,
             api::servers::rename_profile,
             api::servers::set_wiresock,
+            api::servers::set_xray,
+            api::system::install_xray,
             api::cisco::save_cisco,
             api::cisco::cisco_status,
             api::cisco::cisco_login,

@@ -18,6 +18,7 @@ pub mod singbox;
 pub mod subscription;
 pub mod util;
 pub mod wgconf;
+pub mod xray;
 
 pub use model::*;
 

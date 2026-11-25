@@ -51,14 +51,38 @@ pub fn set_profile_json(st: St<'_>, id: String, json: String) -> R<()> {
     let obj = v.as_object_mut().ok_or("Нужен JSON-объект { … }")?;
     obj.remove("tag");
     let ty = obj.get("type").and_then(Value::as_str).ok_or("Не указан \"type\" (протокол)")?;
+    let vless = ty == "vless";
     if !retunl_core::PROXY_TYPES.contains(&ty) {
         return Err(format!("Неизвестный протокол «{ty}»"));
     }
     st.mutate(|d| {
         let p = d.profile_mut(&id).ok_or("Сервер не найден")?;
+        if !vless {
+            p.xray = false;
+        } else if p.uses_xray() {
+            retunl_core::xray::vless(&v)?;
+        }
         p.outbound = v;
         Ok(())
     })?;
+    st.request_reload();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_xray(st: St<'_>, id: String, enabled: bool) -> R<()> {
+    if enabled && (!cfg!(windows) || !st.paths.xray_path().is_file()) {
+        return Err("Сначала установите Xray-core для Windows.".into());
+    }
+    st.mutate(|d| {
+        let p = d.profile_mut(&id).ok_or("Сервер не найден")?;
+        if enabled {
+            retunl_core::xray::vless(&p.outbound)?;
+        }
+        p.xray = enabled;
+        Ok(())
+    })?;
+    locked(&st.latency).remove(&id);
     st.request_reload();
     Ok(())
 }
@@ -174,7 +198,10 @@ pub async fn test_latency(st: St<'_>, ids: Option<Vec<String>>) -> R<HashMap<Str
     if profiles.is_empty() {
         return Ok(HashMap::new());
     }
-    let results = probe::measure(&st.paths, &data.settings, profiles, st.engine.job()).await?;
+    let mut results = probe::measure(&st.paths, &data.settings, profiles, st.engine.job()).await?;
+    // A probe can finish after the user changes the profile or its engine.
+    let current = locked(&st.data);
+    results.retain(|id, _| current.profile(id).is_some_and(|p| data.profile(id) == Some(p)));
     locked(&st.latency).extend(results.clone());
     Ok(results)
 }

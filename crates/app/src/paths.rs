@@ -140,6 +140,10 @@ impl Paths {
             .find(|p| p.exists())
     }
 
+    pub fn xray_path(&self) -> PathBuf {
+        self.core_dir().join("xray").join(crate::fetch::XRAY_VERSION).join("xray.exe")
+    }
+
     pub fn core_for(&self, kind: CoreKind) -> Option<PathBuf> {
         match kind {
             CoreKind::Official => self.find_core(),

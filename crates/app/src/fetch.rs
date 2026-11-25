@@ -158,6 +158,31 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+pub const XRAY_VERSION: &str = "26.11.9";
+
+/// Download the pinned Xray release and publish only the verified executable.
+pub async fn install_xray(http: &reqwest::Client, path: &Path) -> Result<(), String> {
+    let (asset, sha) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => ("Xray-windows-64.zip", "1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d"),
+        ("windows", "aarch64") => ("Xray-windows-arm64-v8a.zip", "9fdd48ff890e54ffdc37f92df9037c940fe4d4f914755b70cc644b97e9678a83"),
+        _ => return Err("Xray-core доступен в Windows x64 и ARM64.".into()),
+    };
+    if path.is_file() { return Ok(()); }
+    let url = format!("https://github.com/XTLS/Xray-core/releases/download/v{XRAY_VERSION}/{asset}");
+    let bytes = verified_archive(http, &url, sha, |_, _| {}).await?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut exe = zip.by_name("xray.exe").map_err(|e| e.to_string())?;
+    let dir = path.parent().ok_or("Нет папки для Xray-core")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+    std::io::copy(&mut exe, &mut tmp).map_err(|e| e.to_string())?;
+    match tmp.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Download a core, check its SHA-256 and unpack it into `dir`.
 pub async fn download_core(
     http: &reqwest::Client,
@@ -166,20 +191,7 @@ pub async fn download_core(
     progress: impl Fn(u64, Option<u64>),
 ) -> Result<PathBuf, String> {
     let (url, sha) = core_asset(kind);
-    let mut r = http.get(&url).send().await.map_err(|e| short_err(&e))?;
-    if !r.status().is_success() {
-        return Err(format!("GitHub ответил {}", r.status().as_u16()));
-    }
-    let total = r.content_length();
-    let mut buf = Vec::with_capacity(total.unwrap_or(0) as usize);
-    while let Some(chunk) = r.chunk().await.map_err(|e| short_err(&e))? {
-        buf.extend_from_slice(&chunk);
-        progress(buf.len() as u64, total);
-    }
-    let hash = format!("{:x}", Sha256::digest(&buf));
-    if hash != sha {
-        return Err("Контрольная сумма архива не совпала — файл повреждён или подменён. Попробуйте ещё раз.".into());
-    }
+    let buf = verified_archive(http, &url, sha, progress).await?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut exe = None;
     for (name, data) in unpack_core(buf)? {
@@ -197,6 +209,23 @@ pub async fn download_core(
         }
     }
     exe.ok_or_else(|| format!("в архиве нет {}", crate::paths::CORE_EXE))
+}
+
+async fn verified_archive(http: &reqwest::Client, url: &str, sha: &str, progress: impl Fn(u64, Option<u64>)) -> Result<Vec<u8>, String> {
+    let mut r = http.get(url).send().await.map_err(|e| short_err(&e))?;
+    if !r.status().is_success() {
+        return Err(format!("GitHub ответил {}", r.status().as_u16()));
+    }
+    let total = r.content_length();
+    let mut buf = Vec::new();
+    while let Some(chunk) = r.chunk().await.map_err(|e| short_err(&e))? {
+        buf.extend_from_slice(&chunk);
+        progress(buf.len() as u64, total);
+    }
+    if format!("{:x}", Sha256::digest(&buf)) != sha {
+        return Err("Контрольная сумма архива не совпала — файл повреждён или подменён. Попробуйте ещё раз.".into());
+    }
+    Ok(buf)
 }
 
 /// The files we need from a release archive: the core, its library, the license.

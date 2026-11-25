@@ -121,6 +121,11 @@ pub async fn download_core(app: AppHandle, st: St<'_>, kind: Option<CoreKind>) -
     Ok(path.display().to_string())
 }
 
+#[tauri::command]
+pub async fn install_xray(st: St<'_>) -> R<()> {
+    fetch::install_xray(&st.http, &st.paths.xray_path()).await
+}
+
 /// All geosite/geoip tags, for hints in the rule editor.
 #[tauri::command]
 pub async fn geo_tags(st: St<'_>) -> R<Vec<String>> {

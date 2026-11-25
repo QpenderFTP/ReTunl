@@ -183,12 +183,18 @@ pub async fn run(
 ) -> Result<SpeedResult, String> {
     let profiles: Vec<Profile> = profile.iter().cloned().collect();
     let (kind, core) = probe::pick(paths, settings, &profiles)?;
-    let profile_name = profile.as_ref().map(|p| p.name.clone());
+    let profile_name = profile.as_ref().map(|p| {
+        if cfg!(windows) && p.protocol() == "vless" {
+            format!("{} ({})", p.name, if p.uses_xray() { "Xray-core" } else { "sing-box" })
+        } else {
+            p.name.clone()
+        }
+    });
     let mut vpn_error = None;
     let vpn_profile = match profile {
         Some(p) => match probe::unsupported(paths, kind, &p) {
             Some(e) => {
-                vpn_error = Some(e.to_string());
+                vpn_error = Some(e);
                 None
             }
             None => Some(p),
@@ -208,6 +214,8 @@ pub async fn run(
         cfg["route"]["rules"] = json!([{"inbound": "in-vpn", "action": "route", "outbound": p.id}]);
     }
     cfg["inbounds"] = json!(inbounds);
+    let plan = crate::xray::for_test(&mut cfg, &refs, settings)?;
+    let _transport = crate::xray::start(plan, paths, job).await?;
     let core = probe::launch(paths, &core, &cfg, "speed.json", ctrl, &secret, job).await?;
 
     let targets = candidates(&settings.speed);

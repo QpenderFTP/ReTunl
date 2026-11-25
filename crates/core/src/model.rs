@@ -17,6 +17,9 @@ pub struct Profile {
     pub link: Option<String>,
     #[serde(default)]
     pub created_at: i64,
+    /// Use the optional Xray VLESS transport on Windows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub xray: bool,
     /// WireGuard through WireSock VPN Client (Windows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiresock: Option<WireSock>,
@@ -71,11 +74,15 @@ pub const PROXY_TYPES: &[&str] = &[
 impl Profile {
     /// A server with only its connection: no subscription, link or extras.
     pub fn new(id: impl Into<String>, name: impl Into<String>, outbound: Value) -> Profile {
-        Profile { id: id.into(), name: name.into(), outbound, subscription: None, link: None, created_at: 0, wiresock: None, cisco: None }
+        Profile { id: id.into(), name: name.into(), outbound, subscription: None, link: None, created_at: 0, xray: false, wiresock: None, cisco: None }
     }
 
     pub fn protocol(&self) -> &str {
         self.outbound.get("type").and_then(Value::as_str).unwrap_or("?")
+    }
+
+    pub fn uses_xray(&self) -> bool {
+        cfg!(windows) && self.xray && self.protocol() == "vless"
     }
 
     pub fn is_endpoint(&self) -> bool {

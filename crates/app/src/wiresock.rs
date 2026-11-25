@@ -132,47 +132,8 @@ async fn resolve(host: &str, port: u16) -> Result<std::net::IpAddr, String> {
     all.iter().find(|ip| ip.is_ipv4()).or(all.first()).copied().ok_or_else(|| "адрес не найден".into())
 }
 
-/// The network adapter Windows sends to `ip` through (before ReTunl's own
-/// virtual adapter is up), by the name sing-box binds to.
 #[cfg(windows)]
-fn best_interface(ip: std::net::IpAddr) -> Option<String> {
-    use windows_sys::Win32::NetworkManagement::IpHelper::{ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias, GetBestInterfaceEx};
-    use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
-    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6};
-
-    let mut index = 0u32;
-    let ok = unsafe {
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                let mut sa: SOCKADDR_IN = std::mem::zeroed();
-                sa.sin_family = AF_INET;
-                sa.sin_addr.S_un.S_addr = u32::from_ne_bytes(v4.octets());
-                GetBestInterfaceEx(&sa as *const _ as *const SOCKADDR, &mut index)
-            }
-            std::net::IpAddr::V6(v6) => {
-                let mut sa: SOCKADDR_IN6 = std::mem::zeroed();
-                sa.sin6_family = AF_INET6;
-                sa.sin6_addr.u.Byte = v6.octets();
-                GetBestInterfaceEx(&sa as *const _ as *const SOCKADDR, &mut index)
-            }
-        }
-    };
-    if ok != 0 {
-        return None;
-    }
-    unsafe {
-        let mut luid: NET_LUID_LH = std::mem::zeroed();
-        if ConvertInterfaceIndexToLuid(index, &mut luid) != 0 {
-            return None;
-        }
-        let mut buf = [0u16; 257];
-        if ConvertInterfaceLuidToAlias(&luid, buf.as_mut_ptr(), buf.len()) != 0 {
-            return None;
-        }
-        let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
-        Some(String::from_utf16_lossy(&buf[..len])).filter(|s| !s.is_empty())
-    }
-}
+use crate::sys::best_interface;
 
 /// The helper and WireSock, running. Dropping it stops both.
 #[cfg_attr(not(windows), allow(dead_code))]

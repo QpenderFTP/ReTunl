@@ -898,7 +898,9 @@ fn used_servers(ctx: &mut Ctx, wiresock: Option<&WireSockLink>, extended_availab
     used.sort_by(|a, b| a.1.cmp(&b.1));
     let via_wiresock = |p: &Profile| wiresock.is_some_and(|w| w.profile_id == p.id);
     // WireSock runs its server itself: it asks nothing of the core
-    let core = choose_core(s.core, used.iter().map(|(p, _)| *p).filter(|p| !via_wiresock(p)), extended_available)?;
+    let native = used.iter().map(|(p, _)| *p).filter(|p| !via_wiresock(p)
+        && !(ctx.os == Os::Windows && p.xray && p.protocol() == "vless"));
+    let core = choose_core(s.core, native, extended_available)?;
     for (p, tag) in used {
         tags.insert(tag.clone(), p.id.clone());
         if let Some(w) = wiresock.filter(|_| via_wiresock(p)) {

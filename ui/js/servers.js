@@ -2,7 +2,7 @@
 
 import {
   h, icon, invoke, busy, toast, errorToast, errText, dialog, confirmDialog, promptDialog, popMenu,
-  pageHead, fmtAgo, fmtBytes, fmtDate, now, plural, banner, formError, showError,
+  pageHead, fmtAgo, fmtBytes, fmtDate, now, plural, banner, field, formError, showError,
 } from './lib.js';
 import {
   store, D, S, act, refresh, protoParts, addressOf, importText, importClipboard, importFile, copyText,
@@ -136,6 +136,7 @@ function row(p) {
       h('span.srv-name', p.name),
       h('span.srv-meta', h('span.srv-proto', base), extra && h('span', extra), h('span.srv-addr', addressOf(p)),
         viaWireSock(p) ? h('span.tag', { title: 'Этот сервер подключает WireSock VPN Client' }, 'WireSock') : null,
+        isWindows() && p.xray && p.outbound.type === 'vless' ? h('span.tag', 'Xray-core') : null,
         isCisco(p) ? ciscoTag() : null,
         needsLx(p) ? h('span.tag.warn', { title: 'Официальный sing-box не умеет этот сервер' }, 'нужно ядро sing-box-lx') : null)),
     latencyEl(store.view.latency[p.id]),
@@ -149,6 +150,7 @@ function row(p) {
         { label: 'Проверить задержку', icon: 'speed', run: () => testLatency(more, [p.id]) },
         { label: 'Проверить скорость', icon: 'down', run: () => speedTestThrough(p.id) },
         { label: 'Переименовать', icon: 'edit', run: () => renameProfile(p) },
+        isWindows() && p.outbound.type === 'vless' && { label: 'Ядро VLESS…', icon: 'plug', run: () => vlessCoreDialog(p) },
         isWindows() && p.outbound.type === 'wireguard' && { label: 'Подключать через WireSock…', icon: 'lock', run: () => wiresockDialog(p) },
         isCisco(p) && { label: 'Войти в Cisco…', icon: 'plug', run: () => ciscoLogin(p) },
         isCisco(p) && { label: 'Выйти из Cisco', icon: 'power', run: () => ciscoLogout() },
@@ -159,6 +161,50 @@ function row(p) {
         { label: 'Удалить', icon: 'trash', danger: true, run: () => removeProfile(p) },
       ]); },
     }, icon('more', 'dots')));
+}
+
+function vlessCoreDialog(p) {
+  const core = store.view.core;
+  const select = h('select.select#vless-core',
+    h('option', { value: 'sing-box' }, 'sing-box'),
+    h('option', { value: 'xray' }, 'Xray-core'));
+  select.value = p.xray ? 'xray' : 'sing-box';
+  const note = h('p.field-note');
+  const err = formError();
+  const save = h('button.btn.primary', { onclick: () => busy(save, async () => {
+    const enabled = select.value === 'xray';
+    select.disabled = true;
+    err.hidden = true;
+    try {
+      const install = enabled && !core.xray_installed;
+      if (install) {
+        save.textContent = 'Скачивание…';
+        await invoke('install_xray');
+        core.xray_installed = true;
+      }
+      if (!dl.el.open) return;
+      if (enabled !== !!p.xray || install) await invoke('set_xray', { id: p.id, enabled });
+      dl.close();
+      await refresh();
+    } catch (e) {
+      showError(err, e);
+    } finally {
+      select.disabled = false;
+      paint();
+    }
+  }) });
+  function paint() {
+    const install = select.value === 'xray' && !core.xray_installed;
+    note.textContent = install
+      ? `ReTunl скачает Xray-core ${core.xray_version} с GitHub и проверит SHA-256 архива.`
+      : 'Выбранное ядро используется для подключения, проверки задержки и скорости.';
+    save.textContent = install ? 'Скачать и применить' : 'Применить';
+  }
+  select.onchange = paint;
+  paint();
+  const dl = dialog({ title: `Ядро VLESS для «${p.name}»`,
+    body: h('div.form-stack', field('vless-core', 'Ядро', select), note, err),
+    actions: [h('button.btn', { onclick: () => dl.close() }, 'Отмена'), save] });
 }
 
 // ---------- actions ----------

@@ -24,6 +24,8 @@ pub struct CoreInfo {
     /// sing-box-lx (AmneziaWG, XHTTP).
     lx_path: Option<String>,
     lx_expected: &'static str,
+    xray_installed: bool,
+    xray_version: &'static str,
     /// Profiles that want sing-box-lx: id → "extended" (only runs there) or
     /// "prefer" (runs on the official core with AmneziaWG junk dropped).
     needs: HashMap<String, &'static str>,
@@ -79,6 +81,8 @@ pub fn get_state(st: St<'_>) -> View {
             expected: retunl_core::SING_BOX_VERSION,
             lx_path: st.paths.find_lx_core().map(|p| p.display().to_string()),
             lx_expected: retunl_core::SING_BOX_LX_VERSION,
+            xray_installed: cfg!(windows) && st.paths.xray_path().is_file(),
+            xray_version: crate::fetch::XRAY_VERSION,
             needs,
         },
         latency: locked(&st.latency).clone(),

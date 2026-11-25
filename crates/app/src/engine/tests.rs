@@ -57,6 +57,9 @@ async fn connect_and_disconnect() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(windows)]
+mod vless_compare;
+
 /// A block rule: the request is counted, and the debug lines sing-box
 /// prints for it stay out of a log set to the normal level.
 #[tokio::test(flavor = "multi_thread")]

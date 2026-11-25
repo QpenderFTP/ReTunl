@@ -79,7 +79,7 @@ export const isCisco = (p) => !!(p && p.cisco);
 /** Windows: WireSock VPN Client runs this WireGuard server, sing-box only reaches it. */
 export const viaWireSock = (p) => isWindows() && !!(p && p.wiresock && p.wiresock.enabled);
 /** The server runs only on sing-box-lx, and ReTunl has none. */
-export const needsLx = (p) => coreNeed(p) === 'extended' && !hasLx() && !viaWireSock(p);
+export const needsLx = (p) => coreNeed(p) === 'extended' && !hasLx() && !viaWireSock(p) && !(isWindows() && p.xray && p.outbound.type === 'vless');
 
 export function protoParts(p) {
   if (isCisco(p)) return { base: 'Cisco Secure Client', extra: '' };

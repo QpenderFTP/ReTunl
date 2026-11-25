@@ -79,8 +79,9 @@ fn merge_json(target: &mut Value, patch: Value) {
 /// The config that would be used right now (for the "show config" button).
 #[tauri::command]
 pub fn preview_config(st: St<'_>) -> R<String> {
-    let built = singbox::build(
-        &st.snapshot(),
+    let data = st.snapshot();
+    let mut built = singbox::build(
+        &data,
         &BuildOptions {
             ruleset_dir: st.paths.ruleset_dir(),
             controller_secret: "••••".into(),
@@ -92,5 +93,6 @@ pub fn preview_config(st: St<'_>) -> R<String> {
         },
     )
     .map_err(|e| e.0)?;
+    crate::xray::for_connection(&mut built, &data)?;
     serde_json::to_string_pretty(&built.config).map_err(|e| e.to_string())
 }

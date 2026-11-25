@@ -175,6 +175,7 @@ pub fn merge_subscription(data: &mut AppData, sub_id: &str, items: Vec<ParsedLin
         fresh.push(Profile {
             subscription: Some(sub_id.to_string()),
             created_at: created,
+            xray: item.outbound["type"] == "vless" && found.is_some_and(|p| p.xray),
             wiresock,
             ..Profile::new(id, item.name, item.outbound)
         });

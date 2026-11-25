@@ -47,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: sing-box for the tests
+      - name: sing-box and Xray-core for the tests
         run: |
           get() { # url sha256 folder
             curl -fsSL "$1" -o core.zip
@@ -58,6 +58,8 @@ jobs:
             99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df .tools/sing-box
           get "https://github.com/Leadaxe/sing-box-lx/releases/download/v$SING_BOX_LX_VERSION/sing-box-$SING_BOX_LX_VERSION-windows-amd64.zip" \
             5eff0f5fba576d3eb57b7ce9c6b60a90125d0a716138ffcd7db47e04e3db2e1a .tools/sing-box-lx
+          get "https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-windows-64.zip" \
+            1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d .tools/xray-26.11.9
 
       - name: Tests
         env:

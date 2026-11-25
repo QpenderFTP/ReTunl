@@ -43,7 +43,7 @@ impl Drop for ProbeCore {
 /// official core does, plus AmneziaWG and XHTTP.
 pub fn pick(paths: &Paths, settings: &Settings, profiles: &[Profile]) -> Result<(CoreKind, PathBuf), String> {
     let lx_ok = paths.find_lx_core().is_some();
-    let need = profiles.iter().map(Profile::core_need).max().unwrap_or(CoreNeed::Any);
+    let need = profiles.iter().filter(|p| !p.uses_xray()).map(Profile::core_need).max().unwrap_or(CoreNeed::Any);
     let mut kind = pick_core(settings.core, need, lx_ok).unwrap_or(
         if lx_ok && settings.core != CorePref::Official { CoreKind::Extended } else { CoreKind::Official },
     );
@@ -55,11 +55,16 @@ pub fn pick(paths: &Paths, settings: &Settings, profiles: &[Profile]) -> Result<
 }
 
 /// Why a server can't be tested on `kind`, if it can't.
-pub fn unsupported(paths: &Paths, kind: CoreKind, p: &Profile) -> Option<&'static str> {
+pub fn unsupported(paths: &Paths, kind: CoreKind, p: &Profile) -> Option<String> {
+    if p.uses_xray() {
+        return if paths.xray_path().is_file() { retunl_core::xray::vless(&p.outbound).err() } else {
+            Some("Установите Xray-core в меню VLESS-сервера.".into())
+        };
+    }
     if kind == CoreKind::Extended || p.core_need() != CoreNeed::Extended {
         return None;
     }
-    Some(if paths.find_lx_core().is_some() { "Включите ядро sing-box-lx в настройках" } else { "Нужно ядро sing-box-lx" })
+    Some(if paths.find_lx_core().is_some() { "Включите ядро sing-box-lx в настройках" } else { "Нужно ядро sing-box-lx" }.into())
 }
 
 #[cfg(not(target_os = "android"))]
@@ -103,9 +108,11 @@ pub async fn launch(
     secret: &str,
     job: Option<&sys::Job>,
 ) -> Result<ProbeCore, String> {
-    let file = paths.run_dir().join(file_name);
-    std::fs::write(&file, serde_json::to_vec_pretty(cfg).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let child = spawn(paths, core, &file)?;
+    // Simultaneous measurements have different ports and SOCKS credentials.
+    let mut file = tempfile::Builder::new().prefix("test-").suffix(file_name)
+        .tempfile_in(paths.run_dir()).map_err(|e| e.to_string())?;
+    serde_json::to_writer(file.as_file_mut(), cfg).map_err(|e| e.to_string())?;
+    let child = spawn(paths, core, file.path())?;
     if let Some(job) = job {
         job.assign(&child);
     }
@@ -149,7 +156,7 @@ pub async fn measure(
     for p in profiles {
         match unsupported(paths, kind, &p) {
             Some(error) => {
-                results.insert(p.id, Latency { ms: None, error: Some(error.into()), at: now_unix() });
+                results.insert(p.id, Latency { ms: None, error: Some(error), at: now_unix() });
             }
             None => runnable.push(p),
         }
@@ -160,7 +167,9 @@ pub async fn measure(
     let port = free_port()?;
     let secret = uuid::Uuid::new_v4().simple().to_string();
     let refs: Vec<&Profile> = runnable.iter().collect();
-    let cfg = build_probe(&refs, settings, port, &secret, kind).map_err(|e| e.0)?;
+    let mut cfg = build_probe(&refs, settings, port, &secret, kind).map_err(|e| e.0)?;
+    let plan = crate::xray::for_test(&mut cfg, &refs, settings)?;
+    let _transport = crate::xray::start(plan, paths, job).await?;
     let probe = launch(paths, &core, &cfg, "probe.json", port, &secret, job).await?;
 
     let url = settings.test_url.clone();

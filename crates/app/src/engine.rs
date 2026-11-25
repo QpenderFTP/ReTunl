@@ -21,7 +21,7 @@ use crate::fetch;
 use crate::paths::Paths;
 use crate::sys;
 use crate::util::{blocking, locked};
-use crate::wiresock;
+use crate::{wiresock, xray};
 
 /// Error text meaning "TUN needs admin rights" — the UI offers a restart.
 pub const NEED_ADMIN: &str = "need_admin";
@@ -149,8 +149,9 @@ struct Inner {
     end_error: Option<String>,
     /// WireSock and its helper, when a server goes through them.
     wiresock: Option<wiresock::Tunnel>,
-    /// WireSock stopped on its own: the connection ends with this.
-    wiresock_error: Option<String>,
+    xray: Option<xray::Running>,
+    /// An external transport exited unexpectedly.
+    transport_error: Option<String>,
     /// Log out of Cisco Secure Client when the user disconnects.
     cisco_logout: bool,
 }
@@ -192,7 +193,8 @@ impl Engine {
                 last_sample: None,
                 end_error: None,
                 wiresock: None,
-                wiresock_error: None,
+                xray: None,
+                transport_error: None,
                 cisco_logout: false,
             }),
             logs: Mutex::new((VecDeque::with_capacity(LOG_CAPACITY), 1)),
@@ -533,7 +535,7 @@ impl Engine {
                 }
             }
         }
-        let mut warnings = built.warnings;
+        let mut warnings = std::mem::take(&mut built.warnings);
         for w in &warnings {
             self.log_app("WARN", w);
         }
@@ -546,6 +548,13 @@ impl Engine {
             warnings.extend(w);
         }
 
+        let plan = xray::for_connection(&mut built, data)?;
+        if plan.is_some() {
+            self.set_step("Запускаю Xray-core…");
+            self.log_app("INFO", &format!("VLESS через Xray-core {}", fetch::XRAY_VERSION));
+        }
+        let transport = xray::start(plan, paths, self.job.as_ref()).await?;
+        self.lock().xray = transport;
         let config = paths.run_dir().join("config.json");
         let json = serde_json::to_vec_pretty(&built.config).map_err(|e| e.to_string())?;
         std::fs::write(&config, json).map_err(|e| format!("Не удалось записать конфигурацию: {e}"))?;
@@ -574,7 +583,7 @@ impl Engine {
         let warning = tunnel.warning.take();
         let mut g = self.lock();
         g.wiresock = Some(tunnel);
-        g.wiresock_error = None;
+        g.transport_error = None;
         Ok(warning)
     }
 
@@ -740,10 +749,10 @@ impl Engine {
                 None => return,
             };
             let Some(code) = exited else {
-                // without WireSock its server is gone: end the connection
-                if let Some(why) = g.wiresock.as_mut().and_then(|t| t.exited()) {
-                    g.wiresock_error = Some(why);
-                    g.wiresock = None;
+                let error = g.wiresock.as_mut().and_then(|t| t.exited())
+                    .or_else(|| g.xray.as_mut().and_then(xray::Running::exited));
+                if let Some(why) = error {
+                    g.transport_error = Some(why);
                     if let Some(c) = g.child.as_mut() {
                         let _ = c.kill();
                     }
@@ -753,10 +762,10 @@ impl Engine {
             let session = g.session.take().expect("session");
             g.child = None;
             g.stop = None;
-            let tunnel = g.wiresock.take();
-            let wiresock_error = g.wiresock_error.take();
+            let tunnel = (g.wiresock.take(), g.xray.take());
+            let transport_error = g.transport_error.take();
             // Android: «Отключить» in the notification is a normal stop too
-            let stopping = (g.stopping || exit_clean(&code)) && wiresock_error.is_none();
+            let stopping = (g.stopping || exit_clean(&code)) && transport_error.is_none();
             drop(g);
             // stops WireSock and its helper
             drop(tunnel);
@@ -770,7 +779,7 @@ impl Engine {
                 self.log_app("INFO", "Отключено");
                 self.set_status(Status::new(Phase::Stopped));
             } else {
-                let msg = wiresock_error
+                let msg = transport_error
                     .or_else(|| exit_error(&code))
                     .or_else(|| self.last_error())
                     .unwrap_or_else(|| format!("sing-box неожиданно завершился ({code})."));
@@ -792,7 +801,7 @@ impl Engine {
             } else if let Some(c) = g.child.as_mut() {
                 let _ = c.kill();
             }
-            g.wiresock.take()
+            (g.wiresock.take(), g.xray.take())
         };
         // stops WireSock and its helper
         drop(tunnel);
@@ -873,7 +882,10 @@ impl Engine {
             }
         }
         // the watcher may not have got to it before the app exits
-        let tunnel = self.lock().wiresock.take();
+        let tunnel = {
+            let mut g = self.lock();
+            (g.wiresock.take(), g.xray.take())
+        };
         drop(tunnel);
         if std::mem::take(&mut self.lock().cisco_logout) {
             let _ = cisco::logout();
