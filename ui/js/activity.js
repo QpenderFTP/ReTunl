@@ -1,7 +1,7 @@
 // Активность: live connections, which rule caught them and where they went.
 
 import {
-  h, icon, invoke, seg, pageHead, popMenu, fmtBytes, fmtClock, toast, errorToast, plural,
+  h, setText, icon, invoke, seg, pageHead, popMenu, fmtBytes, fmtClock, toast, errorToast, plural,
 } from './lib.js';
 import {
   store, ST, emit, connBranch, appIcon, loadIcons, connect, profileByTag, isAndroid, appLabel, ensureProcIndex,
@@ -26,8 +26,10 @@ export const activity = {
   icon: 'activity',
   statusRerender: true,
   count: () => (store.traffic ? store.traffic.connections || '' : ''),
+  needsConnections: () => !paused || store.conns === null,
   render(root) {
-    rows = new Map();
+    rows.clear();
+    tbody = empty = null;
     const running = ST().phase === 'running';
     pauseBtn = h('button.btn', { onclick: togglePause }, icon(paused ? 'play' : 'pause'), paused ? 'Продолжить' : 'Пауза');
     root.append(pageHead('Активность', running ? [
@@ -67,7 +69,7 @@ export const activity = {
     rebuild();
   },
   onTraffic() {
-    if (!paused && tbody) update();
+    if (tbody && (!paused || !rows.size && store.conns?.length)) update();
   },
   onIcons() {
     if (!tbody) return;
@@ -82,7 +84,8 @@ export const activity = {
     if (isAndroid()) for (const el of tbody.querySelectorAll('span.c-proc[data-pkg]')) if (el.dataset.pkg) el.textContent = appLabel(el.dataset.pkg);
   },
   leave() {
-    tbody = null;
+    rows.clear();
+    tbody = empty = pauseBtn = null;
   },
 };
 
@@ -171,8 +174,8 @@ function connItem(c) {
         h('button.icon-btn.small', { title: 'Создать правило', 'aria-label': 'Создать правило', onclick: (e) => ruleMenu(e.currentTarget, c) }, icon('plus')),
         h('button.icon-btn.small', { title: 'Закрыть соединение', 'aria-label': 'Закрыть соединение', onclick: () => closeOne(c.id) }, icon('close')))),
     fill: (tr) => {
-      tr.cells[4].textContent = `${fmtBytes(c.up)} / ${fmtBytes(c.down)}`;
-      tr.cells[5].textContent = fmtClock(since(c.start));
+      setText(tr.cells[4], `${fmtBytes(c.up)} / ${fmtBytes(c.down)}`);
+      setText(tr.cells[5], fmtClock(since(c.start)));
     },
   };
 }
@@ -207,12 +210,18 @@ function appItems(list) {
       h('td.c-act',
         h('button.icon-btn.small', { title: 'Создать правило для программы', 'aria-label': 'Создать правило для программы', onclick: () => ruleFor(g.sample, 'app') }, icon('plus')))),
     fill: (tr) => {
-      tr.cells[1].textContent = String(g.n);
+      setText(tr.cells[1], String(g.n));
       const top = [...g.hosts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => k);
-      tr.cells[2].textContent = top.join(', ');
+      setText(tr.cells[2], top.join(', '));
       tr.cells[2].title = top.join('\n');
-      tr.cells[3].replaceChildren(...[...g.routes.values()].map(routeChipFor));
-      tr.cells[4].textContent = `${fmtBytes(g.up)} / ${fmtBytes(g.down)}`;
+      const routes = [...g.routes.keys()].sort();
+      const signature = JSON.stringify(routes);
+      const cell = tr.cells[3];
+      if (cell.dataset.routes !== signature) {
+        cell.dataset.routes = signature;
+        cell.replaceChildren(...routes.map(key => routeChipFor(g.routes.get(key))));
+      }
+      setText(tr.cells[4], `${fmtBytes(g.up)} / ${fmtBytes(g.down)}`);
     },
   }));
 }

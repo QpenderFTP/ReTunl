@@ -17,8 +17,8 @@ pub async fn disconnect(st: St<'_>) -> R<()> {
 }
 
 #[tauri::command]
-pub async fn poll(st: St<'_>, connections: bool) -> R<Poll> {
-    Ok(st.engine.poll(connections).await)
+pub async fn poll(st: St<'_>, connections: bool, summary: Option<bool>) -> R<Poll> {
+    Ok(st.engine.poll(connections, summary.unwrap_or(false)).await)
 }
 
 #[tauri::command]

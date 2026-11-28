@@ -469,7 +469,7 @@ export function paintCoreBar(bar, kind) {
   bar.hidden = !mine;
   if (mine) {
     bar.classList.toggle('indeterminate', !p.total);
-    bar.firstChild.style.width = p.total ? Math.round((p.done / p.total) * 100) + '%' : '';
+    bar.firstChild.style.transform = p.total ? 'scaleX(' + Math.min(1, p.done / p.total) + ')' : '';
   }
 }
 

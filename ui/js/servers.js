@@ -63,6 +63,7 @@ export const servers = {
   },
   leave() {
     document.removeEventListener('paste', pasteHandler);
+    pasteHandler = lxBar = null;
   },
   onCore() {
     paintCoreBar(lxBar, 'extended');

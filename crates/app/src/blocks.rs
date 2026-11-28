@@ -47,6 +47,7 @@ struct State {
     /// domain (or `#id` when unknown) → when it was last counted
     recent: HashMap<String, Instant>,
     top: HashMap<String, u64>,
+    leaders: Vec<(String, u64)>,
 }
 
 pub struct Blocks {
@@ -77,6 +78,7 @@ impl Blocks {
         s.hosts.clear();
         s.recent.clear();
         s.top.clear();
+        s.leaders.clear();
     }
 
     /// The connection ended: keep the total.
@@ -87,10 +89,7 @@ impl Blocks {
 
     pub fn stats(&self) -> BlockStats {
         let s = self.lock();
-        let mut top: Vec<(String, u64)> = s.top.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        top.truncate(TOP);
-        BlockStats { session: s.session, total: s.total, top, counting: s.counting }
+        BlockStats { session: s.session, total: s.total, top: s.leaders.clone(), counting: s.counting }
     }
 
     /// One sing-box message, without time and level:
@@ -124,7 +123,14 @@ impl Blocks {
         s.session += 1;
         s.total += 1;
         if let Some(h) = host {
-            *s.top.entry(h).or_insert(0) += 1;
+            let count = *s.top.entry(h.clone()).and_modify(|n| *n += 1).or_insert(1);
+            if let Some(row) = s.leaders.iter_mut().find(|(name, _)| name == &h) {
+                row.1 = count;
+            } else if s.leaders.len() < TOP || s.leaders.last().is_some_and(|(name, n)| count > *n || (count == *n && h < *name)) {
+                s.leaders.push((h, count));
+            }
+            s.leaders.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            s.leaders.truncate(TOP);
         }
         let due = s.last_save.is_none_or(|t| now.duration_since(t) >= SAVE_EVERY);
         drop(s);
@@ -219,6 +225,21 @@ mod tests {
         b.begin(true);
         assert_eq!(b.stats().session, 0);
         assert_eq!(b.stats().total, 3);
+    }
+
+    #[test]
+    fn top_domains_keep_ties_and_promote_a_returning_host() {
+        let b = Blocks::new(None);
+        b.begin(true);
+        for (id, host) in ["g", "f", "e", "d", "c", "b", "a", "g"].iter().enumerate() {
+            if id == 7 { b.lock().recent.clear(); }
+            b.observe(&format!("[{id} 0ms] dns: exchange {host}.test. IN A"));
+            b.observe(&format!("[{id} 0ms] dns: match[0] => reject"));
+        }
+        let top = b.stats().top;
+        let names: Vec<_> = top.iter().map(|(host, _)| host.as_str()).collect();
+        assert_eq!(names, ["g.test", "a.test", "b.test", "c.test", "d.test"]);
+        assert_eq!(top[0].1, 2);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // Entry point: navigation (a rail; on phones a tab bar), page switching, events and polling.
 
 import {
-  h, icon, logo, invoke, listen, fmtClock, now, closeMenu, menuOpen, dialog,
+  h, setText, icon, logo, invoke, listen, fmtClock, now, closeMenu, menuOpen, dialog,
 } from './lib.js';
 import {
   store, on, emit, refresh, ST, D, activeProfile, toggleConnection, adminDialog, isOn, isAndroid,
@@ -102,7 +102,7 @@ function backButton() {
 function updateCounts() {
   for (const p of PAGES) {
     const el = document.getElementById('navc-' + p.id);
-    if (el) el.textContent = p.count ? String(p.count() || '') : '';
+    if (el) setText(el, p.count ? String(p.count() || '') : '');
   }
 }
 
@@ -159,6 +159,7 @@ function navigate(id, rerender) {
   renderPage(!changed);
   if (changed && next.enter) next.enter();
   if (changed) document.getElementById('main').focus({ preventScroll: true });
+  syncTicks();
   if (changed) poll();
 }
 
@@ -166,6 +167,8 @@ function navigate(id, rerender) {
 
 on((what) => {
   const p = page();
+  if (what === 'data' || what === 'status') syncTicks();
+  if (document.hidden) return;
   if (what === 'data') {
     updateCounts();
     updateRailStatus();
@@ -198,13 +201,16 @@ async function poll() {
     return;
   }
   polling = true;
+  const requestedPage = store.page;
   try {
-    const wantConns = store.page === 'overview' || store.page === 'activity';
-    const res = await invoke('poll', { connections: wantConns });
+    const wantConns = requestedPage === 'activity' && activity.needsConnections();
+    const res = await invoke('poll', { connections: wantConns, summary: requestedPage === 'overview' });
+    if (document.hidden || ST().phase !== 'running' || ST().since !== st.since || requestedPage !== store.page) return;
     const before = ST();
     store.traffic = res.traffic;
     if (res.blocks) store.blocks = res.blocks;
-    store.conns = wantConns ? res.connections || [] : null;
+    if (requestedPage !== 'activity') store.conns = null;
+    else if (wantConns && activity.needsConnections()) store.conns = res.connections || [];
     if (res.status.phase !== before.phase || res.status.since !== before.since) {
       store.view.status = res.status;
       emit('status');
@@ -214,6 +220,22 @@ async function poll() {
     // core restarting — next tick will catch up
   } finally {
     polling = false;
+    if (requestedPage !== store.page) poll();
+  }
+}
+
+let ticks = null;
+function syncTicks() {
+  const active = !document.hidden && store.view && (ST().phase === 'running' || store.page === 'logs');
+  if (active && ticks === null) {
+    ticks = setInterval(() => {
+      poll();
+      tickClock();
+      if (store.page === 'logs') logs.tick();
+    }, 1000);
+  } else if (!active && ticks !== null) {
+    clearInterval(ticks);
+    ticks = null;
   }
 }
 
@@ -278,10 +300,13 @@ async function init() {
   listen('core-progress', (p) => { store.coreProgress = p; emit('core'); });
   listen('subscriptions-updating', (id) => { store.subUpdating.add(id); emit('data'); });
   listen('data-changed', () => { store.subUpdating.clear(); refresh(); });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh().then(poll); });
-
-  setInterval(poll, 1000);
-  setInterval(tickClock, 1000);
+  document.addEventListener('visibilitychange', () => {
+    syncTicks();
+    if (!document.hidden) {
+      refresh().then(poll).catch(() => {});
+      if (store.page === 'logs') logs.tick();
+    }
+  });
   const update = await invoke('app_ready');
   if (update) {
     navigate('settings');

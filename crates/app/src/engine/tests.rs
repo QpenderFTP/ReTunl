@@ -43,7 +43,7 @@ async fn connect_and_disconnect() {
     engine.start(req).await.expect("connect");
     assert_eq!(engine.status().phase, Phase::Running);
     assert!(!port_free(port), "proxy port is not listening");
-    assert!(engine.poll(true).await.traffic.is_some());
+    assert!(engine.poll(true, false).await.traffic.is_some());
 
     engine.stop().await;
     let until = Instant::now() + Duration::from_secs(10);
@@ -108,7 +108,7 @@ async fn counts_blocked_requests() {
     while engine.blocks.stats().session == 0 && Instant::now() < until {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let s = engine.poll(false).await.blocks;
+    let s = engine.poll(false, false).await.blocks;
     assert_eq!(s.session, 1);
     assert!(s.counting);
     assert_eq!(s.top, vec![("ads.blocked.example".to_string(), 1)]);

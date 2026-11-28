@@ -6,7 +6,7 @@
 //! the one of ReTunl's usual set that answers the path fastest.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use retunl_core::singbox::build_probe;
@@ -14,6 +14,7 @@ use retunl_core::util::now_unix;
 use retunl_core::{Profile, Settings, SpeedPrefs};
 use serde::Serialize;
 use serde_json::json;
+use tokio::task::JoinSet;
 use tokio::time::timeout_at;
 
 use crate::paths::Paths;
@@ -48,8 +49,7 @@ const fn file(
     Builtin { id, name, city, country, region, url, ping: None, auto }
 }
 
-/// Only servers that open from Russian networks without a VPN: the direct
-/// measurement needs them too.
+/// Public download endpoints, including operator-hosted Ookla Speedtest nodes.
 const BUILTIN: &[Builtin] = &[
     Builtin {
         id: "cloudflare",
@@ -62,6 +62,12 @@ const BUILTIN: &[Builtin] = &[
         auto: true,
     },
     file("selectel-spb", "Selectel", "Санкт-Петербург", "Россия", "ru", "https://speedtest.selectel.ru/100MB", true),
+    Builtin { id: "ookla-58664", name: "Speedtest · ProCloud", city: "Москва", country: "Россия", region: "ru",
+        url: "https://speedtest.procloud.ru:8080/download?size=25000000", ping: Some("https://speedtest.procloud.ru:8080/speedtest/latency.txt"), auto: false },
+    Builtin { id: "ookla-56225", name: "Speedtest · Valoo", city: "Хельсинки", country: "Финляндия", region: "eu",
+        url: "https://speedtest.valoonet.fi:8080/download?size=25000000", ping: Some("https://speedtest.valoonet.fi:8080/speedtest/latency.txt"), auto: false },
+    Builtin { id: "ookla-4601", name: "Speedtest · Solcon", city: "Амстердам", country: "Нидерланды", region: "eu",
+        url: "https://speedtest01.ams6.solcon.nl:8080/download?size=25000000", ping: Some("https://speedtest01.ams6.solcon.nl:8080/speedtest/latency.txt"), auto: false },
     file("hostkey-msk", "HOSTKEY", "Москва", "Россия", "ru", "https://speedtest.hostkey.ru/files/100mb.bin", false),
     file("hetzner-hel", "Hetzner", "Хельсинки", "Финляндия", "eu", "https://hel1-speed.hetzner.com/100MB.bin", true),
     file("hetzner-fsn", "Hetzner", "Фалькенштайн", "Германия", "eu", "https://fsn1-speed.hetzner.com/100MB.bin", false),
@@ -168,10 +174,12 @@ pub struct SpeedResult {
 pub struct Progress {
     /// "direct" or "vpn"
     pub stage: &'static str,
-    /// "pick", "ping" or "download"
+    /// "pick", "ping", "download" or "done"
     pub step: &'static str,
     pub mbps: Option<f64>,
     pub server: Option<String>,
+    pub fraction: f64,
+    pub part: Option<SpeedPart>,
 }
 
 pub async fn run(
@@ -220,9 +228,11 @@ pub async fn run(
     let core = probe::launch(paths, &core, &cfg, "speed.json", ctrl, &secret, job).await?;
 
     let targets = candidates(&settings.speed);
-    let direct = measure_path(direct_port, "direct", &targets, &progress).await;
+    let (direct, chosen) = measure_path(direct_port, "direct", &targets, &progress).await;
+    progress(Progress { stage: "direct", step: "done", mbps: direct.mbps, server: direct.server.clone(), fraction: 1.0, part: Some(direct.clone()) });
+    let vpn_targets = chosen.as_ref().map(std::slice::from_ref).unwrap_or(&targets);
     let vpn = match (&vpn_profile, vpn_error) {
-        (Some(_), _) => Some(measure_path(vpn_port, "vpn", &targets, &progress).await),
+        (Some(_), _) => Some(measure_path(vpn_port, "vpn", vpn_targets, &progress).await.0),
         (None, Some(error)) => Some(SpeedPart { error: Some(error), ..SpeedPart::default() }),
         (None, None) => None,
     };
@@ -247,18 +257,18 @@ async fn measure_path(
     stage: &'static str,
     targets: &[Target],
     progress: &(impl Fn(Progress) + Send + Sync),
-) -> SpeedPart {
+) -> (SpeedPart, Option<Target>) {
     let fail = |e: &str| SpeedPart { error: Some(e.to_string()), ..SpeedPart::default() };
     let http = match client(port) {
         Ok(c) => c,
-        Err(e) => return fail(&e),
+        Err(e) => return (fail(&e), None),
     };
     // one server to use: nothing to choose
     let only = targets.len() == 1;
     let ranked = if only {
         targets.to_vec()
     } else {
-        progress(Progress { stage, step: "pick", mbps: None, server: None });
+        progress(Progress { stage, step: "pick", mbps: None, server: None, fraction: 0.0, part: None });
         race(&http, targets).await
     };
     let mut result = fail(if stage == "vpn" {
@@ -269,14 +279,14 @@ async fn measure_path(
     // a test server may refuse in the middle (they limit how much one address takes)
     for target in ranked.into_iter().take(2) {
         let server = Some(target.name.clone());
-        progress(Progress { stage, step: "ping", mbps: None, server: server.clone() });
+        progress(Progress { stage, step: "ping", mbps: None, server: server.clone(), fraction: 0.0, part: None });
         let ping_ms = ping(&http, &target).await;
-        let mbps = download(&http, &target.url, |mbps| {
-            progress(Progress { stage, step: "download", mbps: Some(mbps), server: server.clone() })
+        let mbps = download(&http, &target.url, DOWNLOAD_TIME, MAX_BYTES, |mbps, fraction| {
+            progress(Progress { stage, step: "download", mbps: Some(mbps), server: server.clone(), fraction, part: None })
         })
         .await;
         if let Some(mbps) = mbps {
-            return SpeedPart { mbps: Some(mbps), ping_ms, server, error: None };
+            return (SpeedPart { mbps: Some(mbps), ping_ms, server, error: None }, Some(target));
         }
         result = SpeedPart {
             ping_ms,
@@ -288,118 +298,135 @@ async fn measure_path(
             })
         };
     }
-    result
+    (result, None)
 }
 
-/// Read `url` into `counter` until `until`.
-async fn pull(http: reqwest::Client, url: Arc<str>, counter: Arc<AtomicU64>, until: Instant, cap: u64) -> bool {
-    let until = tokio::time::Instant::from_std(until);
-    let Ok(Ok(mut r)) = timeout_at(until, http.get(&*url).send()).await else { return false };
-    if !r.status().is_success() {
-        return false;
-    }
-    while let Ok(Ok(Some(chunk))) = timeout_at(until, r.chunk()).await {
-        if counter.fetch_add(chunk.len() as u64, Ordering::Relaxed) >= cap {
-            break;
+/// Time to the first data. A server may ignore Range and send a very large
+/// file; consume at most one chunk. HTTP error pages cannot win the race.
+async fn latency_sample(http: &reqwest::Client, target: &Target, limit: Duration) -> Option<Duration> {
+    let start = Instant::now();
+    let req = match &target.ping {
+        Some(url) => http.get(url),
+        None => http.get(&target.url).header(reqwest::header::RANGE, "bytes=0-0"),
+    };
+    tokio::time::timeout(limit, async {
+        let mut response = req.header(reqwest::header::CACHE_CONTROL, "no-cache").send().await.ok()?;
+        if !valid_response(&response) { return None; }
+        let first = response.chunk().await.ok()?;
+        (first.is_some() || target.ping.is_some()).then(|| start.elapsed())
+    }).await.ok().flatten()
+}
+
+fn valid_response(r: &reqwest::Response) -> bool {
+    let mime = r.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok())
+        .unwrap_or("").split(';').next().unwrap_or("").trim();
+    r.status().is_success() && !mime.eq_ignore_ascii_case("text/html") && !mime.eq_ignore_ascii_case("application/json")
+}
+
+async fn race(http: &reqwest::Client, targets: &[Target]) -> Vec<Target> {
+    let mut ranked = Vec::new();
+    // Bound concurrent sockets even for large custom catalogs.
+    for batch in targets.chunks(8) {
+        let mut tasks = JoinSet::new();
+        for target in batch.iter().cloned() {
+            let http = http.clone();
+            tasks.spawn(async move { (latency_sample(&http, &target, PICK_TIME).await, target) });
+        }
+        while let Some(task) = tasks.join_next().await {
+            if let Ok((Some(time), target)) = task { ranked.push((time, target)); }
         }
     }
-    true
+    ranked.sort_by_key(|(time, _)| *time);
+    ranked.into_iter().map(|(_, target)| target).collect()
 }
 
-/// Targets that answered a short race, fastest first.
-async fn race(http: &reqwest::Client, targets: &[Target]) -> Vec<Target> {
-    let until = Instant::now() + PICK_TIME;
-    let counters: Vec<Arc<AtomicU64>> = targets.iter().map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let tasks: Vec<_> = targets
-        .iter()
-        .zip(&counters)
-        .map(|(t, c)| tokio::spawn(pull(http.clone(), t.url.as_str().into(), c.clone(), until, u64::MAX)))
-        .collect();
-    for t in tasks {
-        let _ = t.await;
-    }
-    let mut got: Vec<(&Target, u64)> = targets
-        .iter()
-        .zip(&counters)
-        .map(|(t, c)| (t, c.load(Ordering::Relaxed)))
-        .filter(|(_, n)| *n >= 32 << 10)
-        .collect();
-    got.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    got.into_iter().map(|(t, _)| t.clone()).collect()
-}
-
-/// Round trip to the test server over an open connection, in milliseconds.
 async fn ping(http: &reqwest::Client, target: &Target) -> Option<u32> {
     let mut times = Vec::new();
     for i in 0..4 {
-        let t = Instant::now();
-        let req = match &target.ping {
-            Some(url) => http.get(url),
-            None => http.get(&target.url).header(reqwest::header::RANGE, "bytes=0-0"),
-        };
-        // the body is read so the connection stays open for the next round
-        let r = tokio::time::timeout(Duration::from_secs(5), async { req.send().await?.bytes().await }).await;
-        if !matches!(r, Ok(Ok(_))) {
-            break;
-        }
-        // the first request also opens the connection
-        if i > 0 {
-            times.push(t.elapsed().as_millis() as u32);
-        }
+        let Some(elapsed) = latency_sample(http, target, Duration::from_secs(3)).await else { break };
+        if i > 0 { times.push(elapsed.as_millis() as u32); }
     }
     times.sort_unstable();
     times.get(times.len() / 2).copied()
 }
 
-/// Several parallel downloads for a few seconds; megabits per second.
-async fn download(http: &reqwest::Client, url: &str, live: impl Fn(f64) + Send + Sync) -> Option<f64> {
-    let start = Instant::now();
-    let until = start + DOWNLOAD_TIME;
-    let total = Arc::new(AtomicU64::new(0));
-    let url: Arc<str> = url.into();
-    let tasks: Vec<_> = (0..STREAMS)
-        .map(|_| {
-            let (http, total, url) = (http.clone(), total.clone(), url.clone());
-            tokio::spawn(async move {
-                // a stream that finishes its file starts another one
-                while Instant::now() < until && total.load(Ordering::Relaxed) < MAX_BYTES {
-                    if !pull(http.clone(), url.clone(), total.clone(), until, MAX_BYTES).await {
-                        return;
+#[derive(Default)]
+struct Transfer {
+    first_byte: OnceLock<Instant>,
+    bytes: AtomicU64,
+}
+
+async fn stream(http: reqwest::Client, url: Arc<str>, transfer: Arc<Transfer>, until: Instant, cap: u64) -> bool {
+    let until = tokio::time::Instant::from_std(until);
+    let read = async {
+        while transfer.bytes.load(Ordering::Relaxed) < cap {
+            let Ok(mut r) = http.get(&*url).header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .header(reqwest::header::CACHE_CONTROL, "no-cache").send().await else { return false };
+            if !valid_response(&r) || r.content_length().is_some_and(|n| n < 64 << 10) { return false; }
+            let mut received = 0;
+            loop {
+                match r.chunk().await {
+                    Ok(Some(buf)) => {
+                        let len = buf.len() as u64;
+                        transfer.first_byte.get_or_init(Instant::now);
+                        let before = transfer.bytes.fetch_add(len, Ordering::Relaxed);
+                        received += len;
+                        if before + len >= cap { return true; }
                     }
+                    Ok(None) => break,
+                    Err(_) => return false,
                 }
-            })
-        })
-        .collect();
-    let mut samples: Vec<(Instant, u64)> = vec![(start, 0)];
-    let mut warm: Option<(Instant, u64)> = None;
-    loop {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let now = Instant::now();
-        let n = total.load(Ordering::Relaxed);
-        samples.push((now, n));
-        if warm.is_none() && now.duration_since(start) >= WARM_UP {
-            warm = Some((now, n));
+            }
+            if received < 64 << 10 { return false; }
         }
-        // the last second, so the number moves but does not jump
-        let from = samples.iter().find(|(t, _)| now.duration_since(*t) <= Duration::from_secs(1)).copied().unwrap_or((start, 0));
-        let secs = now.duration_since(from.0).as_secs_f64();
-        if secs > 0.0 {
-            live(mbits(n - from.1, secs));
-        }
-        if tasks.iter().all(|t| t.is_finished()) {
-            break;
-        }
-    }
-    let end = Instant::now();
-    let n = total.load(Ordering::Relaxed);
-    if n < 64 << 10 {
-        return None;
-    }
-    let (t0, n0) = match warm {
-        Some((t, b)) if end.duration_since(t) >= Duration::from_millis(1500) => (t, b),
-        _ => (start, 0),
+        true
     };
-    Some(mbits(n - n0, end.duration_since(t0).as_secs_f64().max(0.25)))
+    timeout_at(until, read).await.unwrap_or(true)
+}
+
+/// Final and live readings use the same byte/time window. On a fast link the
+/// byte budget can be exhausted between UI samples; stop the clock immediately.
+async fn download(http: &reqwest::Client, url: &str, duration: Duration, cap: u64, live: impl Fn(f64, f64)) -> Option<f64> {
+    let start = Instant::now();
+    let until = start + duration;
+    let transfer = Arc::new(Transfer::default());
+    let url: Arc<str> = url.into();
+    let mut tasks = JoinSet::new();
+    for _ in 0..STREAMS {
+        let work = stream(http.clone(), url.clone(), transfer.clone(), until, cap);
+        tasks.spawn(async move { (work.await, Instant::now()) });
+    }
+    let mut ticks = tokio::time::interval(Duration::from_millis(250));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut warm = None;
+    let end = loop {
+        tokio::select! {
+            finished = tasks.join_next() => match finished {
+                Some(Ok((true, end))) => break end,
+                Some(_) => continue,
+                None => return None,
+            },
+            _ = ticks.tick() => {
+                let Some(&first) = transfer.first_byte.get() else { continue };
+                let now = Instant::now();
+                let bytes = transfer.bytes.load(Ordering::Relaxed).min(cap);
+                if warm.is_none() && now.duration_since(first) >= WARM_UP { warm = Some((now, bytes)); }
+                let (t, n) = measurement_window(first, now, warm);
+                if now > t {
+                    let fraction = (now.duration_since(start).as_secs_f64() / duration.as_secs_f64()).max(bytes as f64 / cap as f64);
+                    live(mbits(bytes - n, now.duration_since(t).as_secs_f64()), fraction.min(1.0));
+                }
+            }
+        }
+    };
+    drop(tasks);
+    let bytes = transfer.bytes.load(Ordering::Relaxed).min(cap);
+    let (t, n) = measurement_window(*transfer.first_byte.get()?, end, warm);
+    (bytes >= 64 << 10 && bytes > n && end > t).then(|| mbits(bytes - n, end.duration_since(t).as_secs_f64()))
+}
+
+fn measurement_window(first: Instant, now: Instant, warm: Option<(Instant, u64)>) -> (Instant, u64) {
+    warm.filter(|(t, _)| now.saturating_duration_since(*t) >= Duration::from_secs(1)).unwrap_or((first, 0))
 }
 
 fn mbits(bytes: u64, secs: f64) -> f64 {
@@ -456,6 +483,59 @@ mod tests {
         assert!(check_custom_url("example.com/100MB.bin").is_err());
         assert!(check_custom_url("ftp://example.com/f").is_err());
         assert!(check_custom_url("").is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capped_http_stream_measures_known_rate_and_ignores_large_ping_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicU64::new(0));
+        let count = served.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let count = count.clone();
+                tokio::spawn(async move {
+                    let mut request = [0; 2048];
+                    if socket.read(&mut request).await.is_err() { return; }
+                    // Deliberately ignores Range, as some public CDN endpoints do.
+                    if socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 268435456\r\nConnection: close\r\n\r\n").await.is_err() { return; }
+                    let chunk = [27; 16 * 1024];
+                    let mut ticks = tokio::time::interval(Duration::from_millis(20));
+                    loop {
+                        ticks.tick().await;
+                        if socket.write_all(&chunk).await.is_err() { break; }
+                        count.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let target = Target { name: "local".into(), url, ping: None };
+        assert!(latency_sample(&http, &target, Duration::from_secs(1)).await.is_some());
+        assert!(served.load(Ordering::Relaxed) < 1 << 20);
+        let expected = mbits(4 * 16 * 1024, 0.020);
+        let measured = download(&http, &target.url, Duration::from_secs(3), MAX_BYTES, |_, _| {}).await.unwrap();
+        eprintln!("Controlled HTTP: {measured} Mbps, expected {expected} Mbps");
+        assert!((measured - expected).abs() < expected * 0.1, "{measured} Mbps, expected {expected}");
+        server.abort();
+    }
+
+    /// Smoke check the public Ookla endpoints with a small transfer budget.
+    #[tokio::test]
+    #[ignore]
+    async fn live_speedtest_catalog() {
+        let http = reqwest::Client::builder().no_proxy().no_gzip()
+            .user_agent(concat!("ReTunl/", env!("CARGO_PKG_VERSION"))).build().unwrap();
+        for node in BUILTIN.iter().filter(|b| b.id.starts_with("ookla-")) {
+            let target = Target::from(node);
+            let response = http.get(node.ping.unwrap()).send().await.expect(node.id);
+            assert!(valid_response(&response), "{}: {}", node.id, response.status());
+            let ping = ping(&http, &target).await.expect(node.id);
+            let rate = download(&http, &target.url, Duration::from_secs(5), 8 << 20, |_, _| {}).await.expect(node.id);
+            eprintln!("{}: HTTP ping {ping} ms, {rate} Mbps", target.name);
+            assert!(rate > 0.0, "{}", node.id);
+        }
     }
 
     /// Needs the internet and sing-box in .tools: `cargo test -p retunl speed -- --ignored --nocapture`

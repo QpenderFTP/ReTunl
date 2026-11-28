@@ -4,7 +4,25 @@ use std::time::Duration;
 
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::Method;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
+
+/// On the overview only the selected outbound is needed. Deserializing that
+/// projection skips process paths, host names and rule metadata altogether.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot<C> {
+    #[serde(default)]
+    pub upload_total: u64,
+    #[serde(default)]
+    pub download_total: u64,
+    pub connections: Option<Vec<C>>,
+}
+
+#[derive(Deserialize)]
+pub struct RouteOnly {
+    pub chains: Option<Vec<String>>,
+}
 
 #[derive(Clone)]
 pub struct Clash {
@@ -36,7 +54,7 @@ impl Clash {
             .unwrap_or(false)
     }
 
-    pub async fn connections(&self) -> Result<Value, String> {
+    pub async fn connections<C: DeserializeOwned>(&self) -> Result<Snapshot<C>, String> {
         let r = self
             .req(Method::GET, "/connections")
             .timeout(Duration::from_secs(3))

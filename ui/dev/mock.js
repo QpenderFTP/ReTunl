@@ -191,6 +191,9 @@
   const SPEED_TARGETS = [
     { id: 'cloudflare', name: 'Cloudflare', city: '', country: '', region: 'any', auto: true },
     { id: 'selectel-spb', name: 'Selectel', city: 'Санкт-Петербург', country: 'Россия', region: 'ru', auto: true },
+    { id: 'ookla-58664', name: 'Speedtest · ProCloud', city: 'Москва', country: 'Россия', region: 'ru', auto: false },
+    { id: 'ookla-56225', name: 'Speedtest · Valoo', city: 'Хельсинки', country: 'Финляндия', region: 'eu', auto: false },
+    { id: 'ookla-4601', name: 'Speedtest · Solcon', city: 'Амстердам', country: 'Нидерланды', region: 'eu', auto: false },
     { id: 'hostkey-msk', name: 'HOSTKEY', city: 'Москва', country: 'Россия', region: 'ru', auto: false },
     { id: 'hetzner-hel', name: 'Hetzner', city: 'Хельсинки', country: 'Финляндия', region: 'eu', auto: true },
     { id: 'hetzner-fsn', name: 'Hetzner', city: 'Фалькенштайн', country: 'Германия', region: 'eu', auto: false },
@@ -549,7 +552,7 @@
       log('info', 'sing-box stopped', 'app');
       setStatus({ phase: 'stopped', since: null, profile: null, mode: null });
     },
-    poll: ({ connections }) => {
+    poll: ({ connections, summary }) => {
       if (status.phase !== 'running') return { status, traffic: null, connections: null };
       const up = Math.floor(20000 + Math.random() * 90000);
       const down = Math.floor(300000 + Math.random() * 2400000);
@@ -564,7 +567,9 @@
         blocks.session += 1; blocks.total += 1;
         blocks.top = [...blockTop].sort((a, b) => b[1] - a[1]).slice(0, 5);
       }
-      return { status, traffic: { up, down, up_total: totals.up, down_total: totals.down, connections: conns.length }, connections: connections ? clone(conns) : null, blocks: clone(blocks) };
+      const outbounds = {};
+      if (summary) for (const c of conns) outbounds[c.outbound] = (outbounds[c.outbound] || 0) + 1;
+      return { status, traffic: { up, down, up_total: totals.up, down_total: totals.down, connections: conns.length, outbounds }, connections: connections ? clone(conns) : null, blocks: clone(blocks) };
     },
     close_connection: ({ id: cid }) => { conns = conns.filter((c) => c.id !== cid); },
     close_all_connections: () => { conns = []; },
@@ -596,15 +601,16 @@
       const all = [...SPEED_TARGETS.map((t) => ({ id: t.id, name: t.city ? `${t.name}, ${t.city}` : t.name })), ...sp.custom];
       const picked = all.filter((t) => sp.targets.includes(t.id));
       const part = async (stage, top, auto, ping) => {
-        const server = picked.length ? picked[stage === 'vpn' ? picked.length - 1 : 0].name : auto;
-        if (picked.length !== 1) { emit('speed-progress', { stage, step: 'pick', mbps: null, server: null }); await wait(900); }
+        const server = picked.length ? picked[0].name : auto;
+        if (stage === 'direct' && picked.length !== 1) { emit('speed-progress', { stage, step: 'pick', mbps: null, server: null }); await wait(900); }
         emit('speed-progress', { stage, step: 'ping', mbps: null, server }); await wait(500);
         let v = 0;
-        for (let i = 0; i < 16; i++) { v = top * (0.55 + 0.45 * Math.min(1, i / 5)) * (0.95 + Math.random() * 0.1); emit('speed-progress', { stage, step: 'download', mbps: Math.round(v * 10) / 10, server }); await wait(250); }
+        for (let i = 0; i < 16; i++) { v = top * (0.55 + 0.45 * Math.min(1, i / 5)) * (0.95 + Math.random() * 0.1); emit('speed-progress', { stage, step: 'download', mbps: Math.round(v * 10) / 10, fraction: (i + 1) / 16, server }); await wait(250); }
         return { mbps: Math.round(v * 10) / 10, ping_ms: ping, server, error: null };
       };
       const direct = await part('direct', 190, 'Selectel, Санкт-Петербург', 23);
-      const vpn = ap ? await part('vpn', 120, 'Cloudflare', 58) : null;
+      emit('speed-progress', { stage: 'direct', step: 'done', part: direct, fraction: 1, mbps: direct.mbps, server: direct.server });
+      const vpn = ap ? await part('vpn', 120, direct.server, 58) : null;
       speed = { direct, vpn, profile: ap ? ap.name : null, at: now() };
       return speed;
     },

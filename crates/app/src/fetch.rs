@@ -223,10 +223,16 @@ async fn verified_archive(http: &reqwest::Client, url: &str, sha: &str, progress
     }
     let total = r.content_length();
     let mut buf = Vec::new();
+    let mut next_update = std::time::Instant::now();
     while let Some(chunk) = r.chunk().await.map_err(|e| short_err(&e))? {
         buf.extend_from_slice(&chunk);
-        progress(buf.len() as u64, total);
+        let now = std::time::Instant::now();
+        if now >= next_update {
+            progress(buf.len() as u64, total);
+            next_update = now + Duration::from_millis(150);
+        }
     }
+    progress(buf.len() as u64, total);
     if format!("{:x}", Sha256::digest(&buf)) != sha {
         return Err("Контрольная сумма архива не совпала — файл повреждён или подменён. Попробуйте ещё раз.".into());
     }

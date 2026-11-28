@@ -244,6 +244,9 @@ export const settingsPage = {
         h('button.btn.small.danger', { onclick: () => invoke('quit_app') }, icon('power'), 'Выйти')),
     ].filter(Boolean)));
   },
+  leave() {
+    coreBars.official = coreBars.extended = null;
+  },
   onCore() {
     paintCoreBar(coreBars.official, 'official');
     paintCoreBar(coreBars.extended, 'extended');

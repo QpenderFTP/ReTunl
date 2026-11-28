@@ -5,7 +5,6 @@ import { copyText } from './store.js';
 
 let lines = [];
 let last = 0;
-let timer = null;
 let level = 'all';
 let query = '';
 let view = null;
@@ -62,11 +61,9 @@ export const logs = {
   onData() {},
   enter() {
     fetchLogs();
-    timer = setInterval(fetchLogs, 1000);
   },
+  tick: fetchLogs,
   leave() {
-    clearInterval(timer);
-    timer = null;
     view = null;
   },
 };
@@ -80,7 +77,7 @@ function renderAll() {
 }
 
 async function fetchLogs() {
-  if (inFlight) return;
+  if (inFlight || !view || document.hidden) return;
   inFlight = true;
   try {
     const res = await invoke('get_logs', { after: last });
@@ -94,7 +91,7 @@ async function fetchLogs() {
     const fresh = res.lines.filter(visible);
     if (!fresh.length) return;
     view.querySelector('.log-empty')?.remove();
-    view.append(...fresh.map(lineEl));
+    view.append(...fresh.slice(-2000).map(lineEl));
     while (view.childElementCount > 2000) view.firstChild.remove();
     if (atBottom) view.scrollTop = view.scrollHeight;
   } catch {

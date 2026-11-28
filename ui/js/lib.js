@@ -3,6 +3,13 @@
 
 const T = window.__TAURI__;
 
+export function setText(el, value) {
+  const node = el.firstChild;
+  if (node?.nodeType === Node.TEXT_NODE && !node.nextSibling) {
+    if (node.data !== value) node.data = value;
+  } else if (el.textContent !== value) el.textContent = value;
+}
+
 export function invoke(cmd, args) {
   return T.core.invoke(cmd, args || {});
 }

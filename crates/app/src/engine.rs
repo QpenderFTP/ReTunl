@@ -1,6 +1,6 @@
 //! The sing-box process: start, watch, stop, logs and live statistics.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::blocks::{BlockStats, Blocks};
 use crate::cisco;
-use crate::clash::Clash;
+use crate::clash::{Clash, RouteOnly, Snapshot};
 use crate::fetch;
 use crate::paths::Paths;
 use crate::sys;
@@ -84,6 +84,8 @@ pub struct Traffic {
     pub up_total: u64,
     pub down_total: u64,
     pub connections: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbounds: Option<HashMap<String, usize>>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -338,7 +340,8 @@ impl Engine {
 
     pub fn logs_after(&self, after: u64) -> (Vec<LogLine>, u64) {
         let g = locked(&self.logs);
-        let lines: Vec<LogLine> = g.0.iter().filter(|l| l.seq > after).cloned().collect();
+        let first = g.0.partition_point(|line| line.seq <= after);
+        let lines = g.0.range(first..).cloned().collect();
         (lines, g.1 - 1)
     }
 
@@ -908,18 +911,35 @@ impl Engine {
         }
     }
 
-    pub async fn poll(&self, with_connections: bool) -> Poll {
+    pub async fn poll(&self, with_connections: bool, summary: bool) -> Poll {
         let status = self.status();
         let blocks = self.blocks.stats();
         let Some(session) = self.session() else {
             return Poll { status, traffic: None, connections: None, blocks };
         };
-        let Ok(v) = session.clash.connections().await else {
+        let result = if with_connections {
+            session.clash.connections::<Value>().await.map(|s| {
+                let (traffic, rows) = poll_totals(s);
+                (traffic, Some(rows.iter().map(|c| conn_view(c, &session)).collect()))
+            })
+        } else if summary {
+            session.clash.connections::<RouteOnly>().await.map(|s| {
+                let (mut traffic, rows) = poll_totals(s);
+                let mut counts = HashMap::new();
+                for row in rows {
+                    let tag = row.chains.unwrap_or_default().into_iter().next().unwrap_or_default();
+                    *counts.entry(tag).or_insert(0) += 1;
+                }
+                traffic.outbounds = Some(counts);
+                (traffic, None)
+            })
+        } else {
+            session.clash.connections::<serde::de::IgnoredAny>().await.map(|s| (poll_totals(s).0, None))
+        };
+        let Ok((mut traffic, connections)) = result else {
             return Poll { status, traffic: None, connections: None, blocks };
         };
-        let up_total = v.get("uploadTotal").and_then(Value::as_u64).unwrap_or(0);
-        let down_total = v.get("downloadTotal").and_then(Value::as_u64).unwrap_or(0);
-        let list = v.get("connections").and_then(Value::as_array).cloned().unwrap_or_default();
+        let (up_total, down_total) = (traffic.up_total, traffic.down_total);
         let now = Instant::now();
         let (up, down) = {
             let mut g = self.lock();
@@ -936,8 +956,8 @@ impl Engine {
             g.last_sample = Some((now, up_total, down_total));
             speed
         };
-        let traffic = Traffic { up, down, up_total, down_total, connections: list.len() };
-        let connections = with_connections.then(|| list.iter().map(|c| conn_view(c, &session)).collect());
+        traffic.up = up;
+        traffic.down = down;
         Poll { status, traffic: Some(traffic), connections, blocks }
     }
 
@@ -954,6 +974,15 @@ impl Engine {
             None => Ok(()),
         }
     }
+}
+
+fn poll_totals<C>(s: Snapshot<C>) -> (Traffic, Vec<C>) {
+    let rows = s.connections.unwrap_or_default();
+    let traffic = Traffic {
+        up_total: s.upload_total, down_total: s.download_total, connections: rows.len(),
+        ..Traffic::default()
+    };
+    (traffic, rows)
 }
 
 fn conn_view(c: &Value, session: &Session) -> Conn {

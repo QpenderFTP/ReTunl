@@ -312,8 +312,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--switch-on); }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
 
 .progress { height: 4px; border-radius: 2px; background: var(--sunken); overflow: hidden; }
-.progress-bar { height: 100%; width: 0; background: var(--ink); transition: width .2s; }
-.progress.indeterminate .progress-bar { width: 30%; animation: slide 1.2s ease-in-out infinite; }
+.progress-bar { height: 100%; background: var(--ink); transform: scaleX(0); transform-origin: left; transition: transform .16s linear; }
+.progress.indeterminate .progress-bar { width: 30%; transform: none; animation: slide 1.2s ease-in-out infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 
 .form-error { margin: 10px 0 0; color: var(--block-ink); font-size: 13.5px; white-space: pre-line; }
@@ -394,9 +394,8 @@ ul.plain { margin: 4px 0 0; padding-left: 18px; }
 .road-stop { stroke: var(--block); stroke-width: 4; stroke-linecap: round; transition: opacity .3s; }
 .junction { fill: var(--trunk); stroke: var(--surface); stroke-width: 3; }
 .fork:not(.live) .road:not(.trunk), .fork:not(.live) .road-stop { opacity: .36; }
-.fork.live .junction { fill: var(--ink); }
-.fork.live .road-mark:not(.still), .fork.starting .trunk-mark { animation: flow .9s linear infinite; }
-@keyframes flow { to { stroke-dashoffset: -15; } }
+.fork.live .junction { fill: var(--ink); animation: junction-on .32s ease-out; }
+@keyframes junction-on { from { opacity: .3; } to { opacity: 1; } }
 
 .fork-branches { display: flex; flex-direction: column; min-width: 0; container-type: inline-size; }
 .branch { display: flex; flex-direction: column; justify-content: center; gap: 3px; padding-left: 12px; min-width: 0; }

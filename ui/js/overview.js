@@ -1,7 +1,7 @@
 // Обзор: the connect switch and the fork — where each kind of traffic goes.
 
 import {
-  h, s, add, icon, seg, invoke, fmtRate, fmtBytes, fmtClock, fmtAgo, now, plural, banner, errorToast, dialog,
+  h, s, add, setText, icon, seg, invoke, fmtRate, fmtBytes, fmtClock, fmtAgo, now, plural, banner, errorToast, dialog,
 } from './lib.js';
 import {
   store, D, S, ST, act, isOn, activeProfile, profile, toggleConnection, profileOptions, routePicker,
@@ -38,24 +38,26 @@ export const overview = {
     this.onTraffic();
   },
   onSpeed() {
-    if (refs.speed && refs.speed.isConnected) refs.speed.replaceWith(speedCard());
+    if (refs.speed?.isConnected && !document.hidden) paintSpeed();
   },
   onTraffic() {
     paintBlocks();
     const t = store.traffic;
     if (refs.up && t) {
-      refs.up.textContent = fmtRate(t.up);
-      refs.down.textContent = fmtRate(t.down);
-      refs.sent.textContent = fmtBytes(t.up_total);
-      refs.got.textContent = fmtBytes(t.down_total);
+      setText(refs.up, fmtRate(t.up));
+      setText(refs.down, fmtRate(t.down));
+      setText(refs.sent, fmtBytes(t.up_total));
+      setText(refs.got, fmtBytes(t.down_total));
     }
     const counts = {};
-    for (const c of store.conns || []) {
-      const k = connBranch(c);
-      counts[k] = (counts[k] || 0) + 1;
+    for (const [outbound, n] of Object.entries(t?.outbounds || {})) {
+      const k = connBranch({ outbound });
+      counts[k] = (counts[k] || 0) + n;
     }
     for (const el of document.querySelectorAll('[data-live]')) {
       const n = counts[el.dataset.live];
+      if ((Number(el.dataset.count) || 0) === (n || 0)) continue;
+      el.dataset.count = n || 0;
       if (!n) { el.textContent = ''; el.title = ''; continue; }
       const full = plural(n, 'соединение', 'соединения', 'соединений');
       const [, num, word] = full.match(/^(.*?)(\s\S+)$/) || [, full, ''];
@@ -64,6 +66,7 @@ export const overview = {
       el.replaceChildren(num, h('span.live-word', word));
     }
   },
+  leave() { refs = {}; },
   onCore() {
     paintCoreBar(refs.coreBar, 'official');
     paintCoreBar(refs.lxBar, 'extended');
@@ -285,29 +288,21 @@ function readouts(st) {
 // ---------- speed test ----------
 
 const STEP_TEXT = { pick: 'Ищу тестовый сервер…', ping: 'Измеряю пинг…', download: 'Скачиваю…' };
-const DOWNLOAD_SECS = 8;
+const mbpsFormat = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
 
 function fmtMbps(v) {
   if (v == null) return '—';
-  return v.toLocaleString('ru-RU', { maximumFractionDigits: v < 10 ? 1 : 0 });
+  return mbpsFormat.format(v < 10 ? v : Math.round(v));
 }
 
 /** A round road sign with the speed in it; the ring fills while measuring. */
-function speedSign(route, value, fill, label) {
-  const R = 44;
-  const C = 2 * Math.PI * R;
-  const text = fmtMbps(value);
-  const ring = s('svg', { class: 'sign-ring', viewBox: '0 0 100 100', 'aria-hidden': 'true' },
-    s('circle', { cx: 50, cy: 50, r: R, class: 'ring-bg' }),
-    s('circle', {
-      cx: 50, cy: 50, r: R, class: 'ring-fg', transform: 'rotate(-90 50 50)',
-      'stroke-dasharray': C.toFixed(1), 'stroke-dashoffset': (C * (1 - fill)).toFixed(1),
-    }));
-  return h('div.sign.r-' + route + (value == null ? '.empty' : ''), { role: 'img', 'aria-label': label },
-    ring,
-    h('div.sign-face',
-      h('span.sign-num' + (text.replace(/\s/g, '').length > 3 ? '.long' : ''), text),
-      h('span.sign-unit', 'Мбит/с')));
+function speedSign(route) {
+  return h('div.sign.r-' + route, { role: 'img' },
+    s('svg', { class: 'sign-ring', viewBox: '0 0 100 100', 'aria-hidden': 'true' },
+      s('circle', { cx: 50, cy: 50, r: 44, class: 'ring-bg' }),
+      s('circle', { cx: 50, cy: 50, r: 44, class: 'ring-fg', transform: 'rotate(-90 50 50)', pathLength: 100,
+        'stroke-dasharray': 100, 'stroke-dashoffset': 100 })),
+    h('div.sign-face', h('span.sign-num'), h('span.sign-unit', 'Мбит/с')));
 }
 
 /** "Hetzner, Хельсинки": a built-in test server as results name it. */
@@ -329,42 +324,54 @@ function targetSummary() {
   return picked.length === 1 ? picked[0].name : plural(picked.length, 'сервер', 'сервера', 'серверов');
 }
 
-function speedColumn(stage, part, run, vpnName) {
-  const ap = vpnName;
+function speedColumn(stage) {
   const vpn = stage === 'vpn';
   const route = vpn ? 'tunnel' : 'direct';
   const title = vpn ? 'Через VPN' : 'Без VPN';
-  const live = run && run.stage === stage;
-  let value = part ? part.mbps : null;
-  let fill = value != null ? 1 : 0;
-  let lines;
-  if (live) {
-    value = run.step === 'download' ? run.mbps : null;
-    fill = run.step === 'download' ? Math.min(1, (Date.now() - run.t0) / (DOWNLOAD_SECS * 1000)) : 0;
-    lines = [h('span.speed-step', STEP_TEXT[run.step] || 'Готовлюсь…'), run.server && h('span', run.server)];
-  } else if (run && vpn) {
-    lines = [h('span', ap ? 'Следующий замер' : 'Сервер не выбран')];
-  } else if (vpn && !ap && !(part && part.error)) {
-    lines = [h('span', 'Сервер не выбран')];
-  } else if (part && part.error) {
-    lines = [h('span.speed-error', part.error)];
-  } else if (part) {
-    lines = [part.ping_ms != null && h('span', `Пинг ${part.ping_ms} мс`), part.server && h('span', { title: 'Тестовый сервер' }, part.server)];
-  } else {
-    lines = [h('span', vpn ? (speedPrefs().profile ? 'Через этот сервер' : 'Через выбранный сервер') : 'Напрямую, мимо туннеля')];
+  const sign = speedSign(route);
+  const profileName = h('div.speed-server');
+  const detail = h('span');
+  const endpoint = h('span');
+  const el = h('div.speed-col', sign, h('div.speed-name.r-' + route, title), profileName, h('div.speed-meta', detail, endpoint));
+  const number = sign.querySelector('.sign-num');
+  const ring = sign.querySelector('.ring-fg');
+  function paint(part, run, name) {
+    const live = run?.stage === stage && run.step !== 'done';
+    const value = live ? run.mbps : part?.mbps;
+    const fill = live ? run.fraction : value != null ? 1 : 0;
+    const text = fmtMbps(value);
+    setText(number, text);
+    number.classList.toggle('long', text.replace(/\s/g, '').length > 3);
+    sign.classList.toggle('empty', value == null);
+    const offset = (100 * (1 - fill)).toFixed(1);
+    if (ring.getAttribute('stroke-dashoffset') !== offset) ring.setAttribute('stroke-dashoffset', offset);
+    const label = title + (value == null ? ', нет данных' : ', ' + text + ' Мбит/с');
+    if (sign.getAttribute('aria-label') !== label) sign.setAttribute('aria-label', label);
+    const sub = vpn && name || '';
+    if (profileName.hidden !== !sub) profileName.hidden = !sub;
+    setText(profileName, sub);
+    if (profileName.title !== sub) profileName.title = sub;
+    let message = '';
+    if (live) message = STEP_TEXT[run.step] || 'Готовлюсь…';
+    else if (part?.error) message = part.error;
+    else if (part?.ping_ms != null) message = 'HTTP-пинг ' + part.ping_ms + ' мс';
+    else if (!part) {
+      if (!vpn) message = 'Напрямую, мимо туннеля';
+      else if (!name) message = 'Сервер не выбран';
+      else message = run ? 'Следующий замер' : 'Через выбранный сервер';
+    }
+    setText(detail, message);
+    detail.classList.toggle('speed-error', !live && !!part?.error);
+    detail.classList.toggle('speed-step', live);
+    setText(endpoint, (live ? run.server : part?.server) || '');
   }
-  const sub = vpn ? ap : null;
-  return h('div.speed-col' + (live ? '.live' : ''),
-    speedSign(route, value, fill, `${title}: ${value == null ? 'нет данных' : fmtMbps(value) + ' Мбит/с'}`),
-    h('div.speed-name.r-' + route, title),
-    sub && h('div.speed-server', { title: sub }, sub),
-    h('div.speed-meta', lines));
+  return { el, paint };
 }
 
 function speedVerdict(r) {
   const d = r.direct && r.direct.mbps;
   const v = r.vpn && r.vpn.mbps;
-  if (!d || !v) return null;
+  if (!d || !v || r.direct.server !== r.vpn.server) return null;
   const pct = Math.round((v / d) * 100);
   if (pct >= 105) return `Через VPN быстрее на ${pct - 100}%.`;
   if (pct >= 95) return 'Через VPN скорость почти такая же.';
@@ -372,31 +379,36 @@ function speedVerdict(r) {
 }
 
 function speedCard() {
+  const next = speedProfile();
+  const btn = h('button.btn.small', { onclick: () => runSpeedTest() }, icon('speed'), h('span'));
+  const opt = (label, value) => h('button.speed-opt', { type: 'button', onclick: speedDialog },
+    h('span.speed-opt-label', label), h('span.speed-opt-value', { title: value }, value), icon('chevron'));
+  const options = [opt('Тестовый сервер', targetSummary()), opt('Через сервер', next?.name || 'не выбран')];
+  const direct = speedColumn('direct');
+  const vpn = speedColumn('vpn');
+  const foot = h('p.card-foot');
+  refs.speed = h('section.panel.card.speed-card', h('div.card-head', h('h2.card-title', 'Скорость'), btn),
+    h('div.speed-cols', direct.el, vpn.el), h('div.speed-setup', options), foot);
+  refs.speedParts = { btn, caption: btn.lastChild, options, direct, vpn, foot, next: next?.name };
+  paintSpeed();
+  return refs.speed;
+}
+
+function paintSpeed() {
+  const { btn, caption, options, direct, vpn, foot, next } = refs.speedParts;
   const run = store.speedRun;
   const r = store.view.speed;
-  const next = speedProfile();
-  const btn = h('button.btn.small', { disabled: !!run, onclick: () => runSpeedTest() },
-    icon('speed'), run ? 'Проверяю…' : r ? 'Проверить снова' : 'Проверить');
-  let foot;
-  if (run) foot = 'Около 25 секунд. На каждый замер скачивается до 200 МБ.';
-  else if (r) foot = [speedVerdict(r), `Проверено ${fmtAgo(r.at)}.`].filter(Boolean).join(' ');
-  else foot = 'Сравнит скорость загрузки и пинг без VPN и через сервер.';
-  const directPart = run ? run.direct : r && r.direct;
-  const vpnPart = run ? null : r && r.vpn;
-  // under the VPN sign: the server being measured, the one last measured, or the one the next run takes
-  const vpnName = run ? run.profile : r && r.vpn ? r.profile : next && next.name;
-  // what the next run uses; both rows open the same settings
-  const opt = (label, value) => h('button.speed-opt', { type: 'button', disabled: !!run, onclick: speedDialog },
-    h('span.speed-opt-label', label), h('span.speed-opt-value', { title: value }, value), icon('chevron'));
-  const el = h('section.panel.card.speed-card', { 'aria-busy': run ? 'true' : 'false' },
-    h('div.card-head', h('h2.card-title', 'Скорость'), btn),
-    h('div.speed-cols', speedColumn('direct', directPart, run, null), speedColumn('vpn', vpnPart, run, vpnName)),
-    h('div.speed-setup',
-      opt('Тестовый сервер', targetSummary()),
-      opt('Через сервер', next ? next.name : 'не выбран')),
-    h('p.card-foot', foot));
-  refs.speed = el;
-  return el;
+  if (refs.speed.getAttribute('aria-busy') !== String(!!run)) {
+    refs.speed.setAttribute('aria-busy', String(!!run));
+    btn.disabled = !!run;
+    for (const o of options) o.disabled = !!run;
+  }
+  setText(caption, run ? 'Проверяю…' : r ? 'Проверить снова' : 'Проверить');
+  direct.paint(run ? run.direct : r?.direct, run, null);
+  vpn.paint(run ? null : r?.vpn, run, run ? run.profile : r?.vpn ? r.profile : next);
+  setText(foot, run ? 'Загрузка длится до 8 секунд и расходует до 200 МиБ за попытку.' :
+    r ? [speedVerdict(r), 'Проверено ' + fmtAgo(r.at) + '.'].filter(Boolean).join(' ') :
+    'Сравнит скорость загрузки и пинг без VPN и через сервер.');
 }
 
 const REGIONS = [['any', 'По всему миру'], ['ru', 'Россия'], ['eu', 'Европа'], ['us', 'США']];
@@ -429,10 +441,10 @@ function speedDialog() {
 
   function paintNote() {
     const auto = builtin.filter((t) => t.auto).map((t) => t.name);
-    if (!manual) note.textContent = `ReTunl сам берёт тот сервер, который отвечает быстрее: ${auto.join(', ')}.`;
+    if (!manual) note.textContent = `ReTunl сравнит задержку и выберет один узел для обоих замеров: ${auto.join(', ')}.`;
     else if (!picked.size) note.textContent = 'Отметьте хотя бы один сервер.';
     else if (picked.size === 1) note.textContent = 'Оба замера, без VPN и через сервер, пойдут на этот сервер.';
-    else note.textContent = 'Каждый замер возьмёт из отмеченных тот сервер, который отвечает быстрее.';
+    else note.textContent = 'ReTunl выберет по задержке один сервер для обоих замеров.';
     save.disabled = manual && !picked.size;
   }
 
@@ -510,21 +522,17 @@ function speedDialog() {
   paint();
 }
 
-let ticker = null;
 /** `through`: a server id for this run only (the server's own menu asks for it). */
 async function runSpeedTest(through) {
   if (store.speedRun) return;
   const via = (through && profile(through)) || speedProfile();
-  store.speedRun = { stage: 'direct', step: null, mbps: null, server: null, t0: Date.now(), direct: null, profile: via ? via.name : null };
+  store.speedRun = { stage: 'direct', step: null, mbps: null, server: null, fraction: 0, direct: null, profile: via ? via.name : null };
   overview.onSpeed();
-  // the ring keeps moving between progress events
-  ticker = setInterval(() => overview.onSpeed(), 250);
   try {
     store.view.speed = await invoke('speed_test', { profile: through || null });
   } catch (e) {
     errorToast(e);
   } finally {
-    clearInterval(ticker);
     store.speedRun = null;
     overview.onSpeed();
   }
@@ -541,11 +549,16 @@ export function speedTestThrough(id) {
 export function speedProgress(p) {
   const run = store.speedRun;
   if (!run) return;
-  if (p.stage === 'vpn' && run.stage === 'direct') {
-    run.direct = { mbps: run.mbps, server: run.server, ping_ms: null };
+  if (p.stage === 'direct' && p.step === 'done') run.direct = p.part;
+  // Smooth the live display across backend samples. Completed readings always
+  // come straight from the byte counter, including after returning to this page.
+  const now = performance.now();
+  let mbps = p.mbps;
+  if (p.step === 'download' && run.step === 'download' && run.stage === p.stage && run.server === p.server && run.mbps != null) {
+    const weight = 1 - Math.exp(-(now - run.sampleAt) / 400);
+    mbps = run.mbps + (p.mbps - run.mbps) * weight;
   }
-  if (p.step === 'download' && (run.step !== 'download' || run.stage !== p.stage)) run.t0 = Date.now();
-  Object.assign(run, { stage: p.stage, step: p.step, mbps: p.mbps, server: p.server });
+  Object.assign(run, { stage: p.stage, step: p.step, mbps, sampleAt: now, server: p.server, fraction: p.fraction || 0 });
 }
 
 // ---------- blocked ----------
@@ -585,8 +598,11 @@ function blocksCard(st) {
 function paintBlocks() {
   const b = store.blocks;
   if (!b || !refs.blkSession || !refs.blkSession.isConnected) return;
-  refs.blkSession.textContent = b.session.toLocaleString('ru-RU');
-  refs.blkTotal.textContent = b.total.toLocaleString('ru-RU');
+  if (refs.blockSession === b.session && refs.blockTotal === b.total) return;
+  refs.blockSession = b.session;
+  refs.blockTotal = b.total;
+  setText(refs.blkSession, b.session.toLocaleString('ru-RU'));
+  setText(refs.blkTotal, b.total.toLocaleString('ru-RU'));
   const top = (b.top || []).filter(([, n]) => n > 0);
   if (!top.length) { refs.blkTop.replaceChildren(); return; }
   const max = top[0][1];
